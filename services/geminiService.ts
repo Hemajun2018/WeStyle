@@ -1,9 +1,62 @@
-
-import { GoogleGenAI, Type } from "@google/genai";
 import { StyleType, ImagePlan } from "../types";
 
-// Helper to get a fresh AI instance with the latest env key
-const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
+// ========== New Platform Client (Evolink) ==========
+const EVOLINK_BASE = 'https://api.evolink.ai/v1beta';
+const getApiKey = () => process.env.API_KEY;
+
+type GenOptions = {
+  temperature?: number;
+  maxOutputTokens?: number;
+  responseMimeType?: string;
+  responseSchema?: any;
+  systemText?: string;
+};
+
+async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('缺少 API Key（EVOLINK_API_KEY）。请在 .env.local 中配置。');
+  const body: any = {
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: userText }],
+      },
+    ],
+  };
+
+  if (opts?.systemText) {
+    body.systemInstruction = {
+      role: 'system',
+      parts: [{ text: opts.systemText }],
+    };
+  }
+
+  body.generationConfig = {
+    temperature: opts?.temperature ?? 0.3,
+    // 使用该模型可支持的最大输出上限（常见为 8192）
+    maxOutputTokens: opts?.maxOutputTokens ?? 8192,
+  };
+  if (opts?.responseMimeType) body.generationConfig.responseMimeType = opts.responseMimeType;
+  if (opts?.responseSchema) body.generationConfig.responseSchema = opts.responseSchema;
+
+  const resp = await fetch(`${EVOLINK_BASE}/models/gemini-2.5-flash:generateContent`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`API 调用失败 (${resp.status}): ${text || resp.statusText}`);
+  }
+  const data = await resp.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
+  return text as string;
+}
 
 // System instruction focuses on strict inline CSS and WeChat compatible tags
 const SYSTEM_INSTRUCTION_FORMATTER = `
@@ -11,11 +64,11 @@ You are an expert WeChat Official Account (公众号) typographer.
 Your output must be RAW HTML suitable for direct copy-pasting into the WeChat editor.
 
 CRITICAL RULES:
-1. **NO External CSS**: Do not use <style> tags or class names.
-2. **INLINE STYLES ONLY**: Every single tag must have a 'style' attribute defining its look (font-size, color, line-height, margin, padding).
-3. **TAG USAGE**: Use <section> tags for containers and paragraphs. Avoid <div> if possible. Use <span> for inline styling.
-4. **COMPATIBILITY**: Use rgb() colors. Ensure padding and margins are specific.
-5. **STRUCTURE**: The output should just be the content stream, no <html> or <body> tags.
+1. NO External CSS: Do not use <style> tags or class names.
+2. INLINE STYLES ONLY: Every single tag must have a 'style' attribute defining its look (font-size, color, line-height, margin, padding).
+3. TAG USAGE: Use <section> tags for containers and paragraphs. Avoid <div> if possible. Use <span> for inline styling.
+4. COMPATIBILITY: Use rgb() colors. Ensure padding and margins are specific.
+5. STRUCTURE: The output should just be the content stream, no <html> or <body> tags.
 `;
 
 export const formatText = async (text: string, style: StyleType): Promise<string> => {
@@ -258,17 +311,15 @@ export const formatText = async (text: string, style: StyleType): Promise<string
   `;
 
   try {
-    const ai = getAI();
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION_FORMATTER,
-        temperature: 0.3, 
+    const content = await generateTextViaEvolink(
+      prompt + '\n\nOUTPUT: Only the HTML code, no code fences.',
+      {
+        systemText: SYSTEM_INSTRUCTION_FORMATTER,
+        temperature: 0.25,
+        maxOutputTokens: 8192,
       }
-    });
-
-    return response.text || "<p>Format generation failed.</p>";
+    );
+    return content || "<p>Format generation failed.</p>";
   } catch (error) {
     console.error("Format error:", error);
     throw error;
@@ -280,48 +331,65 @@ export const formatText = async (text: string, style: StyleType): Promise<string
  */
 export const planArticleImages = async (text: string): Promise<ImagePlan> => {
   const prompt = `
-    You are an expert Art Director for a WeChat Official Account. 
-    Analyze the following article text.
-    1. Determine the "Tone" of the article (e.g., Serious, Emotional, Tech-focused, Whimsical).
-    2. Define a consistent "Art Style" for illustrations that matches this tone (e.g., "Minimalist flat vector with orange accents", "Moody oil painting", "Futuristic 3D render").
-    3. Identify 2 or 3 distinct locations in the text where an image would enhance the reading experience (e.g. after a major point or section break).
-    4. For each location, select a unique "positionKeyword" - a short sentence or unique phrase from the text that appears IMMEDIATELY BEFORE where the image should be inserted.
-    5. Write a detailed image prompt for each location.
+    You are an expert Art Director for a WeChat Official Account.
+    Analyze the following article text and RETURN A VALID JSON ONLY (no explanations, no markdown fences) with this shape:
+    {
+      "artStyle": string,
+      "images": [
+        { "prompt": string, "positionKeyword": string },
+        { "prompt": string, "positionKeyword": string },
+        { "prompt": string, "positionKeyword": string }
+      ]
+    }
+
+    Requirements:
+    - 2 or 3 items in images.
+    - positionKeyword must be an exact short phrase/sentence that appears immediately BEFORE the insertion point in the article.
+    - prompts must be detailed and in English.
 
     Article Text (Snippet): "${text.substring(0, 3000)}"
   `;
 
-  const ai = getAI();
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
+  const content = await generateTextViaEvolink(
+    prompt,
+    {
+      systemText: 'You output only strict, valid JSON.',
+      temperature: 0.2,
+      maxOutputTokens: 8192,
+      responseMimeType: 'application/json',
+      // 如果 Evolink 兼容 responseSchema，将其传递；否则模型仍会按要求输出 JSON
       responseSchema: {
-        type: Type.OBJECT,
+        type: 'object',
         properties: {
-          artStyle: { type: Type.STRING, description: "The visual style description for the images." },
+          artStyle: { type: 'string' },
           images: {
-            type: Type.ARRAY,
+            type: 'array',
             items: {
-              type: Type.OBJECT,
+              type: 'object',
               properties: {
-                prompt: { type: Type.STRING, description: "Detailed prompt for generating the image." },
-                positionKeyword: { type: Type.STRING, description: "Exact sentence or phrase from text to insert image after." },
+                prompt: { type: 'string' },
+                positionKeyword: { type: 'string' },
               },
-              required: ["prompt", "positionKeyword"]
-            }
-          }
+              required: ['prompt', 'positionKeyword'],
+            },
+          },
         },
-        required: ["artStyle", "images"]
-      }
+        required: ['artStyle', 'images'],
+      },
     }
-  });
+  );
 
-  const jsonStr = response.text?.trim();
-  if (!jsonStr) throw new Error("Failed to generate image plan");
-  
-  return JSON.parse(jsonStr) as ImagePlan;
+  // Try direct parse first, then fallback to extracting JSON substring
+  const tryParse = (s: string) => {
+    try { return JSON.parse(s) as ImagePlan; } catch { return null as any; }
+  };
+  let parsed = tryParse(content?.trim());
+  if (!parsed) {
+    const match = content.match(/\{[\s\S]*\}$/);
+    if (match) parsed = tryParse(match[0]);
+  }
+  if (!parsed) throw new Error('Failed to parse image plan JSON');
+  return parsed as ImagePlan;
 };
 
 export const generateImageDescription = async (text: string, type: 'cover' | 'illustration'): Promise<string> => {
@@ -336,42 +404,20 @@ export const generateImageDescription = async (text: string, type: 'cover' | 'il
     Return ONLY the English prompt string.
   `;
 
-  const ai = getAI();
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: prompt,
-  });
+  const content = await generateTextViaEvolink(
+    prompt + '\n\nReturn ONLY the English prompt string, no quotes.',
+    {
+      systemText: 'You are a helpful prompt engineer.',
+      temperature: 0.5,
+      maxOutputTokens: 8192,
+    }
+  );
 
-  return response.text || "A beautiful abstract artistic background";
+  return (content || '').trim();
 };
 
 export const generateImage = async (prompt: string, aspectRatio: '4:3' | '16:9' | '1:1' = '4:3'): Promise<string> => {
-  try {
-    const ai = getAI();
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-pro-image-preview',
-      contents: {
-        parts: [{ text: prompt }],
-      },
-      config: {
-        imageConfig: {
-          aspectRatio: aspectRatio,
-          imageSize: "1K" 
-        }
-      }
-    });
-
-    const parts = response.candidates?.[0]?.content?.parts;
-    if (parts) {
-      for (const part of parts) {
-        if (part.inlineData && part.inlineData.data) {
-          return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-        }
-      }
-    }
-    throw new Error("No image data found in response");
-  } catch (error) {
-    console.error("Image gen error:", error);
-    throw error;
-  }
+  // 暂无 apicore 的图像生成接口文档，先提示未配置。
+  // 如需启用，请提供该平台的图片生成 API 规范（端点、参数、返回值）。
+  throw new Error('当前平台的图片生成接口未配置。如需启用，请提供 apicore 的图片生成 API 文档。');
 };
