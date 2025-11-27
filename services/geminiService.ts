@@ -1,7 +1,6 @@
 import { StyleType, ImagePlan } from "../types";
 
 // ========== New Platform Client (Evolink) ==========
-// 生产环境通过 Vercel 函数代理，开发环境可直连（不推荐将密钥暴露到浏览器）
 const EVOLINK_BASE = 'https://api.evolink.ai/v1beta';
 const getApiKey = () => process.env.API_KEY;
 
@@ -13,9 +12,33 @@ type GenOptions = {
   systemText?: string;
 };
 
-async function directEvolinkRequest(body: any) {
+async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error('缺少 EVOLINK_API_KEY（仅开发直连时需要）。');
+  if (!apiKey) throw new Error('缺少 API Key（EVOLINK_API_KEY）。请在 .env.local 中配置。');
+  const body: any = {
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: userText }],
+      },
+    ],
+  };
+
+  if (opts?.systemText) {
+    body.systemInstruction = {
+      role: 'system',
+      parts: [{ text: opts.systemText }],
+    };
+  }
+
+  body.generationConfig = {
+    temperature: opts?.temperature ?? 0.3,
+    // 使用该模型可支持的最大输出上限（常见为 8192）
+    maxOutputTokens: opts?.maxOutputTokens ?? 8192,
+  };
+  if (opts?.responseMimeType) body.generationConfig.responseMimeType = opts.responseMimeType;
+  if (opts?.responseSchema) body.generationConfig.responseSchema = opts.responseSchema;
+
   const resp = await fetch(`${EVOLINK_BASE}/models/gemini-2.5-flash:generateContent`, {
     method: 'POST',
     headers: {
@@ -24,67 +47,12 @@ async function directEvolinkRequest(body: any) {
     },
     body: JSON.stringify(body),
   });
+
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
     throw new Error(`API 调用失败 (${resp.status}): ${text || resp.statusText}`);
   }
-  return resp.json();
-}
-
-async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
-  // 优先通过后端代理，避免在浏览器暴露密钥与跨域问题。
-  const body: any = {
-    userText,
-    systemText: opts?.systemText,
-    temperature: opts?.temperature ?? 0.3,
-    maxOutputTokens: opts?.maxOutputTokens ?? 8192,
-    responseMimeType: opts?.responseMimeType,
-    responseSchema: opts?.responseSchema,
-  };
-
-  let data: any | null = null;
-
-  // 1) 尝试走 Vercel 代理（生产环境生效；本地若无函数会返回 404）
-  try {
-    const resp = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (resp.ok) {
-      data = await resp.json();
-    } else if (resp.status !== 404) {
-      const text = await resp.text().catch(() => '');
-      throw new Error(`API 调用失败 (${resp.status}): ${text || resp.statusText}`);
-    }
-  } catch (e) {
-    // 忽略网络错误，继续尝试直连（本地开发兜底）
-  }
-
-  // 2) 若代理不可用（如本地 404），在开发环境回退到直连 Evolink
-  if (!data) {
-    const isLocal = typeof window !== 'undefined' && (
-      /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname) || window.location.port === '3000'
-    );
-    if (isLocal) {
-      const evoBody: any = {
-        contents: [{ role: 'user', parts: [{ text: userText }] }],
-        generationConfig: {
-          temperature: body.temperature,
-          maxOutputTokens: body.maxOutputTokens,
-        },
-      };
-      if (body.systemText) {
-        evoBody.systemInstruction = { role: 'system', parts: [{ text: body.systemText }] };
-      }
-      if (body.responseMimeType) evoBody.generationConfig.responseMimeType = body.responseMimeType;
-      if (body.responseSchema) evoBody.generationConfig.responseSchema = body.responseSchema;
-      data = await directEvolinkRequest(evoBody);
-    } else {
-      throw new Error('API 代理不可用：/api/generate 404。请检查 Vercel 函数或在本地使用开发直连。');
-    }
-  }
-
+  const data = await resp.json();
   const parts = data?.candidates?.[0]?.content?.parts || [];
   const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
   return text as string;
@@ -107,60 +75,6 @@ export const formatText = async (text: string, style: StyleType): Promise<string
   let stylePrompt = "";
 
   switch (style) {
-    case StyleType.DEEP_BLUE_BRIEF:
-      stylePrompt = `
-        STYLE TARGET: "Deep Blue Brief / 深蓝简报风"
-
-        COLOR PALETTE:
-        - Deep Blue: rgb(7, 98, 210)
-        - Blue Light: rgb(82, 138, 212)
-        - Gold Accent: rgb(227, 194, 94)
-        - Text Primary: rgb(62, 62, 62)
-        - Content Background (light blue): rgb(239, 248, 252)
-
-        HTML TEMPLATE RULES (Inline styles only; no classes or <style>):
-
-        1) GLOBAL CONTAINER (wrap everything once):
-           <section style="font-size: 15px; letter-spacing: 1px; line-height: 2; color: rgb(62,62,62); text-align: justify;">
-
-        2) SECTION TITLE BAR (centered deep-blue ribbon with gold dots on both sides):
-           <section style="text-align: center; display: flex; justify-content: center; align-items: center; margin: 50px 0 20px;">
-             <section style="display: inline-block; width: 10px; height: 10px; background-color: rgb(227,194,94); border-radius: 100px; margin-right: 10px;"></section>
-             <section style="display: inline-block; padding: 2px 15px; background-color: rgb(7,98,210); border-top: 2px solid rgb(82,138,212); border-bottom: 5px solid rgb(227,194,94);">
-               <section style="font-size: 18px; color: rgb(248,248,248); letter-spacing: 2px;">
-                 <b>[SECTION TITLE / 栏目标题]</b>
-               </section>
-             </section>
-             <section style="display: inline-block; width: 10px; height: 10px; background-color: rgb(227,194,94); border-radius: 100px; margin-left: 10px;"></section>
-           </section>
-
-        3) CONTENT BLOCK (light blue background paragraph area):
-           <section style="background-color: rgb(239,248,252); padding: 0 14px;">
-              <p style="margin: 0;">[Paragraph...]</p>
-           </section>
-
-        4) NUMBERED HEADING (01/02 ... + deep-blue title):
-           <section style="display: flex; align-items: center; margin: 20px 0 10px;">
-             <section style="background-color: rgb(7,98,210); padding: 2px 9px; margin-right: 8px;">
-               <section style="color: rgb(255,255,255); font-size: 18px; font-weight: bold;">01</section>
-             </section>
-             <section style="padding: 0 15px; border-top: 2px solid rgb(227,194,94); border-bottom: 2px solid rgb(227,194,94);">
-               <section style="font-size: 18px; color: rgb(7,98,210); font-weight: 700;">[HEADING TEXT]</section>
-             </section>
-           </section>
-
-        5) PARAGRAPHS (standard):
-           <p style="text-indent: 0em; margin: 0 0 12px 0;">[Paragraph...]</p>
-
-        6) QUOTE / EMPHASIS BOX (gray caption style):
-           <section style="background-color: rgb(248,248,248); padding: 10px 12px; font-size: 12px;">
-             <p style="margin: 0; color: rgb(62,62,62);"><strong>说明</strong>： [Note content]</p>
-           </section>
-
-        7) SMALL MUTED TEXT (editor / audit etc):
-           <p style="margin: 0; color: rgb(162,162,162);">[Muted small text]</p>
-      `;
-      break;
     case StyleType.TECH_MAG:
       stylePrompt = `
         STYLE TARGET: "Tech Magazine / 科技杂志风"
