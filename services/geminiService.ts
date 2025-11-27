@@ -457,8 +457,19 @@ export const formatText = async (text: string, style: StyleType): Promise<string
       break;
   }
 
+  const IMAGE_TOKEN_RULES = `
+    IMAGE TOKEN RULES:
+    - The input may contain image tokens like {{IMG:img-<id>}}.
+    - Do NOT remove or reorder these tokens.
+    - At the exact token positions, output a standalone image block container in HTML, such as:
+      <section>[[IMAGE:img-<id>]]</section>
+    - Use exactly [[IMAGE:...]] placeholder inside the block; do not invent src. Keep everything else styled per the target rules.
+    - The input may also contain URL tokens like {{IMGURL:https://...}}. For these, KEEP THE TOKEN TEXT UNCHANGED at the exact position (do not convert it), so the client can resolve it.
+  `;
+
   const prompt = `
     ${stylePrompt}
+    ${IMAGE_TOKEN_RULES}
     
     TASK: Format the following text into the requested HTML structure.
     INPUT TEXT:

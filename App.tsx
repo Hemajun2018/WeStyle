@@ -4,6 +4,8 @@ import { StyleType } from './types';
 import { StyleSelector } from './components/StyleSelector';
 import { Button } from './components/Button';
 import { formatText, planArticleImages, generateImage, generateImageDescription } from './services/geminiService';
+import { imageStore } from './utils/imageStore';
+import { compressImage } from './utils/imageCompressor';
 
 const App: React.FC = () => {
   const enableImageFeatures = (import.meta as any)?.env?.VITE_ENABLE_IMAGE_GEN === 'true';
@@ -19,6 +21,7 @@ const App: React.FC = () => {
 
   // Refs for auto-scrolling
   const previewRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Check for API key on mount
   useEffect(() => {
@@ -75,7 +78,7 @@ const App: React.FC = () => {
         const ensured = startsWithGridWrapper
           ? trimmed
           : `<section style="box-sizing: border-box; border-width: 0px; border-style: solid; border-color: rgb(229, 229, 229); color: rgb(10, 10, 10); font-style: normal; font-variant-ligatures: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; text-indent: 0px; text-transform: none; word-spacing: 0px; -webkit-text-stroke-width: 0px; white-space: normal; text-decoration-thickness: initial; text-decoration-style: initial; text-decoration-color: initial; text-align: left; line-height: 1.75; font-family: 'PingFang SC', -apple-system-font, BlinkMacSystemFont, 'Helvetica Neue', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', Arial, sans-serif; font-size: 15px; background: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px), repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px) rgba(0, 0, 0, 0.02); border-radius: 12px; padding: 8px; visibility: visible;">${trimmed}</section>`;
-        setFormattedHtml(ensured);
+        setFormattedHtml(await replaceImagePlaceholders(ensured, selectedStyle));
       } else if (selectedStyle === StyleType.LITERARY) {
         // Ensure Literary style uses a soft paper-like background wrapper
         const trimmed = html.trimStart();
@@ -83,7 +86,7 @@ const App: React.FC = () => {
         const ensured = startsWithSoftWrapper
           ? trimmed
           : `<section style="box-sizing: border-box; border-width: 1px; border-style: solid; border-color: #e6e6e6; color: #2c2c2c; font-style: normal; font-weight: 400; letter-spacing: normal; text-indent: 0; text-transform: none; word-spacing: 0; -webkit-text-stroke-width: 0; white-space: normal; text-align: justify; line-height: 2.0; font-family: 'Kaiti SC','STKaiti', serif; font-size: 17px; background-color: #fdfbf7; padding: 20px;">${trimmed}</section>`;
-        setFormattedHtml(ensured);
+        setFormattedHtml(await replaceImagePlaceholders(ensured, selectedStyle));
       } else if (selectedStyle === StyleType.CLAUDE) {
         // Apply huasheng's Claude background color (#faf9f7) as an outer wrapper to persist in WeChat
         const trimmed = html.trimStart();
@@ -91,9 +94,9 @@ const App: React.FC = () => {
         const ensured = startsWithClaudeBg
           ? trimmed
           : `<section style="box-sizing: border-box; color: #24292f; line-height: 1.75; font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', Arial, sans-serif; font-size: 16px; background-color: #faf9f7; padding: 20px 16px;">${trimmed}</section>`;
-        setFormattedHtml(ensured);
+        setFormattedHtml(await replaceImagePlaceholders(ensured, selectedStyle));
       } else {
-        setFormattedHtml(html);
+        setFormattedHtml(await replaceImagePlaceholders(html, selectedStyle));
       }
     } catch (error) {
       handleApiError(error);
@@ -212,9 +215,10 @@ const App: React.FC = () => {
     };
 
     try {
+      const htmlForCopy = await inlineImagesAsBase64(formattedHtml);
       // Ensure the HTML is a single root element (already ensured for Tech Mag)
-      const htmlBlob = new Blob([formattedHtml], { type: 'text/html' });
-      const textBlob = new Blob([toPlainText(formattedHtml)], { type: 'text/plain' });
+      const htmlBlob = new Blob([htmlForCopy], { type: 'text/html' });
+      const textBlob = new Blob([toPlainText(htmlForCopy)], { type: 'text/plain' });
       const item = new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': textBlob });
       await (navigator as any).clipboard.write([item]);
       alert('已复制！请直接粘贴到公众号后台。');
@@ -229,7 +233,7 @@ const App: React.FC = () => {
       temp.style.opacity = '0';
       temp.style.pointerEvents = 'none';
       document.body.appendChild(temp);
-      temp.innerHTML = formattedHtml;
+      temp.innerHTML = await inlineImagesAsBase64(formattedHtml);
 
       const range = document.createRange();
       const firstEl = temp.firstElementChild as HTMLElement | null;
@@ -245,6 +249,272 @@ const App: React.FC = () => {
       document.body.removeChild(temp);
     }
   }, [formattedHtml]);
+
+  // Paste & Drop Handlers for images
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.kind === 'file' && it.type.startsWith('image/')) {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    // Prefer full HTML conversion if present
+    const html = e.clipboardData?.getData('text/html');
+    if (html && html.trim()) {
+      e.preventDefault();
+      const textWithTokens = htmlToTextWithImgTokens(html);
+      const ta = textareaRef.current;
+      const start = ta?.selectionStart ?? inputText.length;
+      const end = ta?.selectionEnd ?? inputText.length;
+      const before = inputText.slice(0, start);
+      const after = inputText.slice(end);
+      const next = before + textWithTokens + after;
+      setInputText(next);
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          const pos = before.length + textWithTokens.length;
+          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
+        }
+      });
+      return;
+    }
+
+    // Fallback: handle pasted files
+    if (files.length > 0) {
+      e.preventDefault();
+      await insertImagesAsTokens(files);
+      return;
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLTextAreaElement>) => {
+    e.preventDefault();
+    const dt = e.dataTransfer;
+    const files: File[] = [];
+    if (dt?.files && dt.files.length) {
+      for (let i = 0; i < dt.files.length; i++) {
+        const f = dt.files[i];
+        if (f.type.startsWith('image/')) files.push(f);
+      }
+    }
+    if (files.length === 0) return;
+    await insertImagesAsTokens(files);
+  };
+
+  async function insertImagesAsTokens(files: File[]) {
+    const ta = textareaRef.current;
+    const start = ta?.selectionStart ?? inputText.length;
+    const end = ta?.selectionEnd ?? inputText.length;
+    let before = inputText.slice(0, start);
+    const after = inputText.slice(end);
+    for (const file of files) {
+      try {
+        const { blob, width, height, mimeType, originalSize, compressedSize } = await compressImage(file);
+        const id = generateImageId();
+        await imageStore.saveImage({
+          id,
+          name: file.name || 'image',
+          mimeType,
+          width,
+          height,
+          originalSize,
+          compressedSize,
+          createdAt: Date.now(),
+        }, blob);
+        // Insert token on a new line for clarity
+        const token = `\n{{IMG:${id}}}\n`;
+        before += token;
+      } catch (err) {
+        console.error('Failed to handle image', err);
+      }
+    }
+    const next = before + after;
+    setInputText(next);
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        const pos = before.length;
+        textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
+      }
+    });
+  }
+
+  function generateImageId() {
+    return `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  async function insertImageUrlsAsTokens(urls: string[]) {
+    const ta = textareaRef.current;
+    const start = ta?.selectionStart ?? inputText.length;
+    const end = ta?.selectionEnd ?? inputText.length;
+    const before = inputText.slice(0, start);
+    const after = inputText.slice(end);
+    const tokens = urls.map(u => `\n{{IMGURL:${u}}}\n`).join('');
+    const next = before + tokens + after;
+    setInputText(next);
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        const pos = before.length + tokens.length;
+        textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
+      }
+    });
+  }
+
+  function htmlToTextWithImgTokens(html: string): string {
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    const blocks = new Set(['P','DIV','SECTION','ARTICLE','HEADER','FOOTER','MAIN','ASIDE','H1','H2','H3','H4','H5','H6','UL','OL','LI','BLOCKQUOTE','PRE','TABLE','THEAD','TBODY','TR','TD','TH','HR','BR']);
+    let out = '';
+
+    const walk = (node: Node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = (node.textContent || '').replace(/[\t\r]+/g, ' ');
+        out += text;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const el = node as HTMLElement;
+      const tag = el.tagName;
+      if (tag === 'IMG') {
+        const src = el.getAttribute('src') || '';
+        if (src) out += `\n{{IMGURL:${src}}}\n`;
+        return;
+      }
+      if (tag === 'BR' || tag === 'HR') {
+        out += '\n';
+        return;
+      }
+      if (tag === 'LI') {
+        out += '\n- ';
+      }
+      // Enter block: ensure newline separation
+      if (blocks.has(tag)) {
+        if (!out.endsWith('\n')) out += '\n';
+      }
+      for (const child of Array.from(el.childNodes)) walk(child);
+      if (blocks.has(tag)) {
+        if (!out.endsWith('\n')) out += '\n';
+      }
+    };
+    for (const child of Array.from(container.childNodes)) walk(child);
+    // Normalize newlines and spaces
+    out = out.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    return out;
+  }
+
+  async function replaceImagePlaceholders(html: string, style: StyleType): Promise<string> {
+    // Support both [[IMAGE:img-..]] from formatter and {{IMG:img-..}} tokens
+    const ids = new Set<string>();
+    const urlTokens: Array<string> = [];
+    const re1 = /\[\[IMAGE:([^\]]+)\]\]/g;
+    const re2 = /\{\{IMG:([^}]+)\}\}/g;
+    const reUrl = /\{\{IMGURL:([^}]+)\}\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re1.exec(html))) ids.add(m[1]);
+    while ((m = re2.exec(html))) ids.add(m[1]);
+    while ((m = reUrl.exec(html))) urlTokens.push(m[1]);
+    if (ids.size === 0 && urlTokens.length === 0) return html;
+
+    const urlMap = new Map<string, string>();
+    for (const id of ids) {
+      try {
+        const blob = await imageStore.getImageBlob(id);
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          urlMap.set(id, url);
+        }
+      } catch (e) {
+        console.warn('No image for id', id);
+      }
+    }
+
+    const buildBlock = (id: string) => {
+      const src = urlMap.get(id) || '';
+      return imageBlockForStyle(style, id, src, null);
+    };
+
+    let out = html;
+    out = out.replace(re1, (_s, gid) => buildBlock(gid));
+    out = out.replace(re2, (_s, gid) => buildBlock(gid));
+    out = out.replace(reUrl, (_s, gurl) => imageBlockForStyle(style, null, gurl, gurl));
+    return out;
+  }
+
+  function imageBlockForStyle(style: StyleType, id: string | null, src: string, remoteUrl: string | null) {
+    // Base styles
+    const baseImg = 'width: 100%; max-height: 400px; object-fit: contain; border-radius: 8px; display: block;';
+    const baseWrap = 'margin: 20px 0; text-align: center;';
+    let extraWrap = '';
+    let extraImg = '';
+    switch (style) {
+      case StyleType.TECH_MAG:
+        extraImg = 'box-shadow: 0 2px 10px rgba(0,0,0,0.08); border-radius: 6px;';
+        break;
+      case StyleType.CLAUDE:
+        extraImg = 'box-shadow: 0 8px 32px rgba(193,95,60,0.12); border-radius: 12px;';
+        break;
+      case StyleType.LITERARY:
+        extraWrap = 'padding: 6px; border: 1px solid #e6e6e6; border-radius: 6px; background: #fff;';
+        break;
+      default:
+        extraImg = 'box-shadow: 0 2px 8px rgba(0,0,0,0.06);';
+    }
+    const attrs: string[] = [];
+    if (id) attrs.push(`data-image-id=\"${id}\"`);
+    if (remoteUrl) attrs.push(`data-image-url=\"${remoteUrl}\"`);
+    return `<section style="${baseWrap} ${extraWrap}"><img ${attrs.join(' ')} src="${src}" style="${baseImg} ${extraImg}" alt="image"/></section>`;
+  }
+
+  async function inlineImagesAsBase64(html: string): Promise<string> {
+    // Parse and replace <img data-image-id>
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    const imgs = Array.from(container.querySelectorAll('img')) as HTMLImageElement[];
+    for (const img of imgs) {
+      const id = img.getAttribute('data-image-id');
+      const remote = img.getAttribute('data-image-url');
+      try {
+        if (id) {
+          const blob = await imageStore.getImageBlob(id);
+          if (blob) {
+            const b64 = await blobToDataURL(blob);
+            img.setAttribute('src', b64);
+            continue;
+          }
+        }
+        if (remote) {
+          const b64 = await fetchToBase64(remote);
+          if (b64) img.setAttribute('src', b64);
+        }
+      } catch (e) {
+        console.warn('inline base64 failed for', id || remote || 'unknown', e);
+      }
+    }
+    return container.innerHTML;
+  }
+
+  function blobToDataURL(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(fr.error);
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  async function fetchToBase64(url: string): Promise<string | null> {
+    try {
+      const res = await fetch(url, { mode: 'cors', cache: 'default' });
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      return await blobToDataURL(blob);
+    } catch {
+      return null;
+    }
+  }
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row font-sans text-ink-900 bg-paper-50">
@@ -271,6 +541,10 @@ const App: React.FC = () => {
             placeholder="粘贴您的文章内容到这里..."
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
+            onPaste={handlePaste}
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
+            ref={textareaRef}
           />
         </div>
         {/* Secondary Actions (可选功能保持在左侧) */}
