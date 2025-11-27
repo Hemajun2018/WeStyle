@@ -437,7 +437,7 @@ export const formatText = async (text: string, style: StyleType): Promise<string
         STYLE TARGET: "Claude/Tech Minimalist"
         
         HTML TEMPLATE RULES:
-        1. **Global**: <section style="font-family: -apple-system, sans-serif; font-size: 16px; line-height: 1.75; color: #24292f;">
+        1. **Global**: <section style="font-family: -apple-system, sans-serif; font-size: 16px; line-height: 1.75; color: #24292f; background-color: #faf9f7;">
         2. **Headings**: <section style="color: #b56a5d; font-size: 18px; font-weight: 600; margin-top: 30px; margin-bottom: 15px; padding-left: 10px; border-left: 4px solid #b56a5d;">Header</section>
         3. **Paragraphs**: <section style="margin-bottom: 20px;">text...</section>
         4. **Code/Tech terms**: <span style="background-color: #f6f8fa; padding: 2px 4px; border-radius: 3px; font-family: monospace; font-size: 0.9em; color: #24292f;">code</span>

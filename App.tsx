@@ -84,6 +84,14 @@ const App: React.FC = () => {
           ? trimmed
           : `<section style="box-sizing: border-box; border-width: 1px; border-style: solid; border-color: #e6e6e6; color: #2c2c2c; font-style: normal; font-weight: 400; letter-spacing: normal; text-indent: 0; text-transform: none; word-spacing: 0; -webkit-text-stroke-width: 0; white-space: normal; text-align: justify; line-height: 2.0; font-family: 'Kaiti SC','STKaiti', serif; font-size: 17px; background-color: #fdfbf7; padding: 20px;">${trimmed}</section>`;
         setFormattedHtml(ensured);
+      } else if (selectedStyle === StyleType.CLAUDE) {
+        // Apply huasheng's Claude background color (#faf9f7) as an outer wrapper to persist in WeChat
+        const trimmed = html.trimStart();
+        const startsWithClaudeBg = /^<section[^>]*background-color:\s*#faf9f7/i.test(trimmed) || /^<section[^>]*background:\s*#faf9f7/i.test(trimmed);
+        const ensured = startsWithClaudeBg
+          ? trimmed
+          : `<section style="box-sizing: border-box; color: #24292f; line-height: 1.75; font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', Arial, sans-serif; font-size: 16px; background-color: #faf9f7; padding: 20px 16px;">${trimmed}</section>`;
+        setFormattedHtml(ensured);
       } else {
         setFormattedHtml(html);
       }
