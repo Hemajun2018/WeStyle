@@ -8,6 +8,7 @@ export enum StyleType {
   ZEN = 'Zen Minimalist',
   QBIT = 'QbitAI Tech',
   TECH_MAG = 'Tech Magazine',
+  DEEP_BLUE_BRIEF = 'Deep Blue Brief',
 }
 
 export interface FormattingOption {
@@ -27,6 +28,12 @@ export interface ImagePlan {
 }
 
 export const FORMATTING_OPTIONS: FormattingOption[] = [
+  {
+    id: StyleType.DEEP_BLUE_BRIEF,
+    name: "深蓝简报风",
+    description: "深蓝主色搭配金色点缀，编号条与内容淡蓝背景，沉稳清晰。",
+    previewColor: "bg-[#0762D2]"
+  },
   {
     id: StyleType.TECH_MAG,
     name: "科技杂志风",

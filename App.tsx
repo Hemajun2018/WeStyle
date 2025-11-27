@@ -53,10 +53,10 @@ const App: React.FC = () => {
   const handleApiError = (error: any) => {
     console.error(error);
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes("403") || msg.includes("Permission denied") || msg.includes("permission")) {
-      if (window.confirm("调用 API 失败：权限被拒绝。\n\nGemini 3 Pro 等高级模型可能需要绑定了结算账户（Billing）的 API Key。\n\n是否重新选择/配置 API Key？")) {
-        handleConnectKey();
-      }
+    if (msg.includes("403") || /permission/i.test(msg)) {
+      alert(
+        "调用 API 失败（403/权限）。\n\n请检查：\n1) 服务器端是否已设置 EVOLINK_API_KEY 并重新部署；\n2) Key 是否有效、权限/配额是否足够；\n\n错误详情：" + msg
+      );
     } else {
       alert("操作失败: " + msg);
     }
@@ -192,15 +192,7 @@ const App: React.FC = () => {
               AI 驱动的公众号排版引擎
             </p>
           </div>
-          {window.aistudio && (
-            <button 
-              onClick={handleConnectKey}
-              className="text-xs text-gray-400 hover:text-ink-900 underline"
-              title="更换 API Key"
-            >
-              更换 Key
-            </button>
-          )}
+          {/* 移除在线更换 Key 的入口，改为仅通过服务器端环境变量配置 */}
         </header>
 
         {/* Style Selection */}
