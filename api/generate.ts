@@ -1,9 +1,10 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+// Note: avoid depending on '@vercel/node' types to keep builds simple on Vercel
+// Use loose typing compatible with Node.js serverless handler signature.
 
 // Serverless proxy on Vercel to call Evolink API securely
 const EVOLINK_BASE = 'https://api.evolink.ai/v1beta';
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'Method Not Allowed' });
     return;
