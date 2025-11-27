@@ -13,9 +13,26 @@ type GenOptions = {
   systemText?: string;
 };
 
+async function directEvolinkRequest(body: any) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('缺少 EVOLINK_API_KEY（仅开发直连时需要）。');
+  const resp = await fetch(`${EVOLINK_BASE}/models/gemini-2.5-flash:generateContent`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`API 调用失败 (${resp.status}): ${text || resp.statusText}`);
+  }
+  return resp.json();
+}
+
 async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
   // 优先通过后端代理，避免在浏览器暴露密钥与跨域问题。
-  const proxyUrl = '/api/generate';
   const body: any = {
     userText,
     systemText: opts?.systemText,
@@ -25,17 +42,49 @@ async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
     responseSchema: opts?.responseSchema,
   };
 
-  const resp = await fetch(proxyUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let data: any | null = null;
 
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`API 调用失败 (${resp.status}): ${text || resp.statusText}`);
+  // 1) 尝试走 Vercel 代理（生产环境生效；本地若无函数会返回 404）
+  try {
+    const resp = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (resp.ok) {
+      data = await resp.json();
+    } else if (resp.status !== 404) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`API 调用失败 (${resp.status}): ${text || resp.statusText}`);
+    }
+  } catch (e) {
+    // 忽略网络错误，继续尝试直连（本地开发兜底）
   }
-  const data = await resp.json();
+
+  // 2) 若代理不可用（如本地 404），在开发环境回退到直连 Evolink
+  if (!data) {
+    const isLocal = typeof window !== 'undefined' && (
+      /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname) || window.location.port === '3000'
+    );
+    if (isLocal) {
+      const evoBody: any = {
+        contents: [{ role: 'user', parts: [{ text: userText }] }],
+        generationConfig: {
+          temperature: body.temperature,
+          maxOutputTokens: body.maxOutputTokens,
+        },
+      };
+      if (body.systemText) {
+        evoBody.systemInstruction = { role: 'system', parts: [{ text: body.systemText }] };
+      }
+      if (body.responseMimeType) evoBody.generationConfig.responseMimeType = body.responseMimeType;
+      if (body.responseSchema) evoBody.generationConfig.responseSchema = body.responseSchema;
+      data = await directEvolinkRequest(evoBody);
+    } else {
+      throw new Error('API 代理不可用：/api/generate 404。请检查 Vercel 函数或在本地使用开发直连。');
+    }
+  }
+
   const parts = data?.candidates?.[0]?.content?.parts || [];
   const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
   return text as string;
