@@ -11,6 +11,7 @@ type GenOptions = {
   responseMimeType?: string;
   responseSchema?: any;
   systemText?: string;
+  model?: string; // allow overriding model name if needed
 };
 
 async function directEvolinkRequest(body: any) {
@@ -31,6 +32,30 @@ async function directEvolinkRequest(body: any) {
   return resp.json();
 }
 
+// 低层：多轮直连 Evolink（用于超长输出的自动续写）
+async function generateViaEvolink(
+  contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>,
+  opts?: GenOptions
+) {
+  const body: any = { contents };
+  if (opts?.systemText) {
+    body.systemInstruction = { role: 'system', parts: [{ text: opts.systemText }] };
+  }
+  body.generationConfig = {
+    temperature: opts?.temperature ?? 0.3,
+    maxOutputTokens: opts?.maxOutputTokens ?? 8192,
+  };
+  if (opts?.responseMimeType) body.generationConfig.responseMimeType = opts.responseMimeType;
+  if (opts?.responseSchema) body.generationConfig.responseSchema = opts.responseSchema;
+
+  const data = await directEvolinkRequest(body);
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
+  const finishReason = data?.candidates?.[0]?.finishReason;
+  return { text: text as string, finishReason, raw: data };
+}
+
+// 单轮：优先走代理，失败再直连（给 JSON 规划/短文本用）
 async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
   // 优先通过后端代理，避免在浏览器暴露密钥与跨域问题。
   const body: any = {
@@ -394,18 +419,48 @@ export const formatText = async (text: string, style: StyleType): Promise<string
     ${text}
 
     OUTPUT: Only the HTML code. Do not include markdown code fences.
+    IMPORTANT: Append the exact sentinel comment <!-- END_OF_ARTICLE --> at the very end of the output.
   `;
 
   try {
-    const content = await generateTextViaEvolink(
-      prompt + '\n\nOUTPUT: Only the HTML code, no code fences.',
-      {
-        systemText: SYSTEM_INSTRUCTION_FORMATTER,
-        temperature: 0.25,
-        maxOutputTokens: 8192,
-      }
-    );
-    return content || "<p>Format generation failed.</p>";
+    // Auto-continue loop to avoid truncation on providers with tighter output limits
+    const messages: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [
+      { role: 'user', parts: [{ text: prompt + '\n\nOUTPUT: Only the HTML code, no code fences.' }] },
+    ];
+    const opts = {
+      systemText: SYSTEM_INSTRUCTION_FORMATTER,
+      temperature: 0.25,
+      maxOutputTokens: 8192,
+    } as GenOptions;
+
+    let combined = '';
+    let safetyBreak = 0;
+    const MAX_TURNS = 6;
+
+    while (safetyBreak < MAX_TURNS) {
+      const { text: chunk, finishReason } = await generateViaEvolink(messages, opts);
+      const chunkSafe = chunk || '';
+      if (!chunkSafe.trim()) break;
+      combined += chunkSafe;
+
+      // Found end sentinel → stop
+      if (combined.includes('<!-- END_OF_ARTICLE -->')) break;
+
+      // If model signaled max-tokens or simply didn't finish, ask to continue
+      messages.push({ role: 'model', parts: [{ text: chunkSafe }] });
+      messages.push({
+        role: 'user',
+        parts: [{
+          text: 'Continue ONLY the remaining HTML from where you left off. Do not repeat any previous content. Ensure all tags are closed. End with <!-- END_OF_ARTICLE -->.'
+        }],
+      });
+
+      safetyBreak += 1;
+    }
+
+    if (!combined) return "<p>Format generation failed.</p>";
+    // Strip the sentinel before returning
+    return combined.replace(/<!--\s*END_OF_ARTICLE\s*-->/g, '').trim();
   } catch (error) {
     console.error("Format error:", error);
     throw error;
