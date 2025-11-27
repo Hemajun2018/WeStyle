@@ -6,6 +6,7 @@ import { Button } from './components/Button';
 import { formatText, planArticleImages, generateImage, generateImageDescription } from './services/geminiService';
 
 const App: React.FC = () => {
+  const enableImageFeatures = (import.meta as any)?.env?.VITE_ENABLE_IMAGE_GEN === 'true';
   const [inputText, setInputText] = useState<string>('');
   const [formattedHtml, setFormattedHtml] = useState<string>('');
   const [selectedStyle, setSelectedStyle] = useState<StyleType>(StyleType.MODERN_WECHAT);
@@ -229,26 +230,29 @@ const App: React.FC = () => {
           >
             一键智能排版
           </Button>
-          
-          <Button 
-            variant="secondary" 
-            onClick={handleGenerateCover} 
-            isLoading={isGeneratingCover}
-            disabled={!inputText}
-            className="text-xs"
-          >
-            AI 生成封面
-          </Button>
+          {enableImageFeatures && (
+            <>
+              <Button 
+                variant="secondary" 
+                onClick={handleGenerateCover} 
+                isLoading={isGeneratingCover}
+                disabled={!inputText}
+                className="text-xs"
+              >
+                AI 生成封面
+              </Button>
 
-          <Button 
-            variant="secondary" 
-            onClick={handleSmartIllustration} 
-            isLoading={isGeneratingIllustration}
-            disabled={!formattedHtml}
-            className="text-xs"
-          >
-            智能分析配图
-          </Button>
+              <Button 
+                variant="secondary" 
+                onClick={handleSmartIllustration} 
+                isLoading={isGeneratingIllustration}
+                disabled={!formattedHtml}
+                className="text-xs"
+              >
+                智能分析配图
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
