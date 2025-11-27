@@ -3,7 +3,8 @@ import { StyleType, ImagePlan } from "../types";
 // ========== New Platform Client (Evolink) ==========
 // 生产环境通过 Vercel 函数代理，开发环境可直连（不推荐将密钥暴露到浏览器）
 const EVOLINK_BASE = 'https://api.evolink.ai/v1beta';
-const getApiKey = () => process.env.API_KEY;
+// Prefer EVOLINK_API_KEY; allow legacy API_KEY for local fallback
+const getApiKey = () => (process.env.EVOLINK_API_KEY || process.env.API_KEY);
 
 type GenOptions = {
   temperature?: number;
@@ -32,27 +33,72 @@ async function directEvolinkRequest(body: any) {
   return resp.json();
 }
 
-// 低层：多轮直连 Evolink（用于超长输出的自动续写）
+// 低层：多轮生成（优先 Vercel 代理，开发环境可直连）
 async function generateViaEvolink(
   contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>,
   opts?: GenOptions
 ) {
-  const body: any = { contents };
-  if (opts?.systemText) {
-    body.systemInstruction = { role: 'system', parts: [{ text: opts.systemText }] };
-  }
-  body.generationConfig = {
+  // lightweight trace id for correlating turns in Vercel logs
+  const traceId = `mf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const common: any = {
+    contents,
+    systemText: opts?.systemText,
     temperature: opts?.temperature ?? 0.3,
     maxOutputTokens: opts?.maxOutputTokens ?? 8192,
+    responseMimeType: opts?.responseMimeType,
+    responseSchema: opts?.responseSchema,
   };
-  if (opts?.responseMimeType) body.generationConfig.responseMimeType = opts.responseMimeType;
-  if (opts?.responseSchema) body.generationConfig.responseSchema = opts.responseSchema;
 
-  const data = await directEvolinkRequest(body);
+  let data: any | null = null;
+  // 1) 先走 Vercel 无服务器函数（生产环境）
+  try {
+    const started = Date.now();
+    const resp = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...common, traceId, turn: 1 }),
+    });
+    if (resp.ok) {
+      data = await resp.json();
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
+      console.log(`[TRACE] turn=1 trace=${traceId} dur=${Date.now() - started}ms outChars=${text.length}`);
+    } else if (resp.status !== 404) {
+      const t = await resp.text().catch(() => '');
+      throw new Error(`API 调用失败 (${resp.status}): ${t || resp.statusText}`);
+    }
+  } catch {}
+
+  // 2) 若代理不可用（如本地 404），在本地开发回退直连 Evolink
+  if (!data) {
+    const isLocal = typeof window !== 'undefined' && (
+      /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname) || window.location.port === '3000'
+    );
+    if (isLocal) {
+      const evoBody: any = {
+        contents,
+        generationConfig: {
+          temperature: common.temperature,
+          maxOutputTokens: common.maxOutputTokens,
+        },
+      };
+      if (common.systemText) evoBody.systemInstruction = { role: 'system', parts: [{ text: common.systemText }] };
+      if (common.responseMimeType) evoBody.generationConfig.responseMimeType = common.responseMimeType;
+      if (common.responseSchema) evoBody.generationConfig.responseSchema = common.responseSchema;
+      const started = Date.now();
+      data = await directEvolinkRequest(evoBody);
+      const parts = data?.candidates?.[0]?.content?.parts || [];
+      const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
+      console.log(`[TRACE-LOCAL] turn=1 trace=${traceId} dur=${Date.now() - started}ms outChars=${text.length}`);
+    } else {
+      throw new Error('API 代理不可用：/api/generate 404。请检查 Vercel 函数或在本地使用开发直连。');
+    }
+  }
+
   const parts = data?.candidates?.[0]?.content?.parts || [];
   const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
   const finishReason = data?.candidates?.[0]?.finishReason;
-  return { text: text as string, finishReason, raw: data };
+  return { text: text as string, finishReason, raw: data, _traceId: traceId };
 }
 
 // 单轮：优先走代理，失败再直连（给 JSON 规划/短文本用）
@@ -438,7 +484,8 @@ export const formatText = async (text: string, style: StyleType): Promise<string
     const MAX_TURNS = 6;
 
     while (safetyBreak < MAX_TURNS) {
-      const { text: chunk, finishReason } = await generateViaEvolink(messages, opts);
+      const t0 = Date.now();
+      const { text: chunk, finishReason, _traceId } = await generateViaEvolink(messages, opts);
       const chunkSafe = chunk || '';
       if (!chunkSafe.trim()) break;
       combined += chunkSafe;
@@ -455,6 +502,7 @@ export const formatText = async (text: string, style: StyleType): Promise<string
         }],
       });
 
+      console.log(`[TRACE] trace=${_traceId} turn=${safetyBreak + 1} finish=${finishReason || '-'} dur=${Date.now() - t0}ms combinedChars=${combined.length}`);
       safetyBreak += 1;
     }
 
