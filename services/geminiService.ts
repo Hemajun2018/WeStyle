@@ -1,6 +1,7 @@
 import { StyleType, ImagePlan } from "../types";
 
 // ========== New Platform Client (Evolink) ==========
+// 生产环境通过 Vercel 函数代理，开发环境可直连（不推荐将密钥暴露到浏览器）
 const EVOLINK_BASE = 'https://api.evolink.ai/v1beta';
 const getApiKey = () => process.env.API_KEY;
 
@@ -13,38 +14,20 @@ type GenOptions = {
 };
 
 async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
-  const apiKey = getApiKey();
-  if (!apiKey) throw new Error('缺少 API Key（EVOLINK_API_KEY）。请在 .env.local 中配置。');
+  // 优先通过后端代理，避免在浏览器暴露密钥与跨域问题。
+  const proxyUrl = '/api/generate';
   const body: any = {
-    contents: [
-      {
-        role: 'user',
-        parts: [{ text: userText }],
-      },
-    ],
-  };
-
-  if (opts?.systemText) {
-    body.systemInstruction = {
-      role: 'system',
-      parts: [{ text: opts.systemText }],
-    };
-  }
-
-  body.generationConfig = {
+    userText,
+    systemText: opts?.systemText,
     temperature: opts?.temperature ?? 0.3,
-    // 使用该模型可支持的最大输出上限（常见为 8192）
     maxOutputTokens: opts?.maxOutputTokens ?? 8192,
+    responseMimeType: opts?.responseMimeType,
+    responseSchema: opts?.responseSchema,
   };
-  if (opts?.responseMimeType) body.generationConfig.responseMimeType = opts.responseMimeType;
-  if (opts?.responseSchema) body.generationConfig.responseSchema = opts.responseSchema;
 
-  const resp = await fetch(`${EVOLINK_BASE}/models/gemini-2.5-flash:generateContent`, {
+  const resp = await fetch(proxyUrl, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
 

@@ -18,3 +18,11 @@ View your app in AI Studio: https://ai.studio/apps/drive/1GsGW5g0JpVpYQx20qu2oR-
 2. Set the `EVOLINK_API_KEY` in [.env.local](.env.local) to your Evolink API key
 3. Run the app:
    `npm run dev`
+
+## Deploy on Vercel
+
+- 在 Vercel 项目 Settings -> Environment Variables 配置 `EVOLINK_API_KEY`
+- 前端通过 `/api/generate` 无服务器函数代理 Evolink，避免在浏览器暴露密钥与跨域问题
+- 部署后若 403，请确认：
+  - 环境变量已配置在 Production 与 Preview，并触发了重新构建
+  - Evolink 账户/Key 权限正常，允许访问 `gemini-2.5-flash`
