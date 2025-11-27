@@ -10,18 +10,15 @@ type GenOptions = {
   responseMimeType?: string;
   responseSchema?: any;
   systemText?: string;
+  model?: string; // allow overriding model name if needed
 };
 
-async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
+// Low-level caller that accepts full contents array for multi-turn continuation
+async function generateViaEvolink(contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>, opts?: GenOptions) {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('缺少 API Key（EVOLINK_API_KEY）。请在 .env.local 中配置。');
   const body: any = {
-    contents: [
-      {
-        role: 'user',
-        parts: [{ text: userText }],
-      },
-    ],
+    contents,
   };
 
   if (opts?.systemText) {
@@ -39,7 +36,8 @@ async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
   if (opts?.responseMimeType) body.generationConfig.responseMimeType = opts.responseMimeType;
   if (opts?.responseSchema) body.generationConfig.responseSchema = opts.responseSchema;
 
-  const resp = await fetch(`${EVOLINK_BASE}/models/gemini-2.5-flash:generateContent`, {
+  const model = opts?.model || 'gemini-2.5-flash';
+  const resp = await fetch(`${EVOLINK_BASE}/models/${model}:generateContent`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -55,7 +53,16 @@ async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
   const data = await resp.json();
   const parts = data?.candidates?.[0]?.content?.parts || [];
   const text = parts.map((p: any) => p?.text).filter(Boolean).join('');
-  return text as string;
+  const finishReason = data?.candidates?.[0]?.finishReason;
+  return { text: text as string, finishReason, raw: data };
+}
+
+// Simple one-shot wrapper for backwards compatibility
+async function generateTextViaEvolink(userText: string, opts?: GenOptions) {
+  const res = await generateViaEvolink([
+    { role: 'user', parts: [{ text: userText }] },
+  ], opts);
+  return res.text;
 }
 
 // System instruction focuses on strict inline CSS and WeChat compatible tags
@@ -308,18 +315,48 @@ export const formatText = async (text: string, style: StyleType): Promise<string
     ${text}
 
     OUTPUT: Only the HTML code. Do not include markdown code fences.
+    IMPORTANT: Append the exact sentinel comment <!-- END_OF_ARTICLE --> at the very end of the output.
   `;
 
   try {
-    const content = await generateTextViaEvolink(
-      prompt + '\n\nOUTPUT: Only the HTML code, no code fences.',
-      {
-        systemText: SYSTEM_INSTRUCTION_FORMATTER,
-        temperature: 0.25,
-        maxOutputTokens: 8192,
-      }
-    );
-    return content || "<p>Format generation failed.</p>";
+    // Auto-continue loop to avoid truncation on providers with tighter output limits
+    const messages: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [
+      { role: 'user', parts: [{ text: prompt + '\n\nOUTPUT: Only the HTML code, no code fences.' }] },
+    ];
+    const opts = {
+      systemText: SYSTEM_INSTRUCTION_FORMATTER,
+      temperature: 0.25,
+      maxOutputTokens: 8192,
+    } as GenOptions;
+
+    let combined = '';
+    let safetyBreak = 0;
+    const MAX_TURNS = 6;
+
+    while (safetyBreak < MAX_TURNS) {
+      const { text: chunk, finishReason } = await generateViaEvolink(messages, opts);
+      const chunkSafe = chunk || '';
+      if (!chunkSafe.trim()) break;
+      combined += chunkSafe;
+
+      // Found end sentinel → stop
+      if (combined.includes('<!-- END_OF_ARTICLE -->')) break;
+
+      // If model signaled max-tokens or simply didn't finish, ask to continue
+      messages.push({ role: 'model', parts: [{ text: chunkSafe }] });
+      messages.push({
+        role: 'user',
+        parts: [{
+          text: 'Continue ONLY the remaining HTML from where you left off. Do not repeat any previous content. Ensure all tags are closed. End with <!-- END_OF_ARTICLE -->.'
+        }],
+      });
+
+      safetyBreak += 1;
+    }
+
+    if (!combined) return "<p>Format generation failed.</p>";
+    // Strip the sentinel before returning
+    return combined.replace(/<!--\s*END_OF_ARTICLE\s*-->/g, '').trim();
   } catch (error) {
     console.error("Format error:", error);
     throw error;
