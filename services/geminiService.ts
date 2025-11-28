@@ -238,7 +238,7 @@ export const formatText = async (text: string, style: StyleType): Promise<string
         
         HTML TEMPLATE RULES:
         1. **Global Container** (Must wrap everything):
-           <section style="box-sizing: border-box; font-family: 'PingFang SC', -apple-system-font, BlinkMacSystemFont, Arial, sans-serif; font-size: 15px; background: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px), repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px) rgba(0, 0, 0, 0.02); border-radius: 12px; padding: 8px; color: rgb(10, 10, 10); line-height: 1.75;">
+           <section style="box-sizing: border-box; font-family: 'PingFang SC', -apple-system, BlinkMacSystemFont, Arial, sans-serif; font-size: 15px; color: rgb(10,10,10); line-height: 1.85; border-radius: 12px; padding: 12px; background-color: #F7F7F7; background-image: linear-gradient(0deg, #E7E7E7 1px, transparent 1px), linear-gradient(90deg, #E7E7E7 1px, transparent 1px); background-size: 24px 24px; background-repeat: repeat;">
         
         2. **Headings** (Capsule Style):
            <h2 style="font-size: 19.5px; font-weight: bold; margin: 4em auto 2em; text-align: center; line-height: 1.75; display: table; padding: 0.3em 1em; background: rgb(198, 110, 73); border-radius: 8px; box-shadow: rgba(0, 0, 0, 0.1) 0px 4px 6px; color: white !important;">
@@ -459,13 +459,13 @@ export const formatText = async (text: string, style: StyleType): Promise<string
 
   const IMAGE_TOKEN_RULES = `
     IMAGE TOKEN RULES (STRICT):
-    - The input may contain image tokens like {{IMG:img-<id>}} and URL tokens like {{IMGURL:https://...}} OR short URL tokens like [[URL:1]], [[URL:2]], etc.
-    - Do NOT remove, reorder, or deduplicate these tokens.
-    - For {{IMG:img-<id>}}: At the exact token position, output a STANDALONE block containing ONLY the placeholder, e.g.:
-        <section>[[IMAGE:img-<id>]]</section>
-      where [[IMAGE:...]] is plain text (not inside any attribute).
-    - NEVER generate <img>, <figure>, <picture>, or any tag that sets an image src. Do not place [[IMAGE:...]] or {{IMGURL:...}} inside any HTML attribute.
+    - The input may contain tokens: [[IMAGE:img-<id>]] (preferred), {{IMG:img-<id>}}, {{IMGURL:https://...}}, and short URL tokens [[URL:1]], [[URL:2]], etc.
+    - Do NOT remove, reorder, rename, or deduplicate tokens.
+    - For [[IMAGE:img-<id>]]: KEEP THE TOKEN TEXT UNCHANGED at that position. It must be plain text (not inside any attribute). You may wrap it in a simple <section> for layout, but the token string must stay intact.
+    - For {{IMG:img-<id>}}: Output a STANDALONE block containing ONLY the placeholder [[IMAGE:img-<id>]] at that exact position.
     - For {{IMGURL:https://...}} and [[URL:n]]: KEEP THE TOKEN TEXT UNCHANGED at the exact position (do not convert it or wrap it in <img>); the client will resolve it.
+    - NEVER generate <img>, <figure>, <picture>, or any tag that sets an image src. Do not place [[IMAGE:...]], {{IMGURL:...}}, or [[URL:n]] inside any HTML attribute.
+    - NEVER output natural-language placeholders like [image 1024x768 PNG]; always keep the exact tokens instead.
     - Do NOT invent, add, or remove any image references beyond the given tokens.
   `;
 

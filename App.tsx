@@ -30,9 +30,10 @@ const App: React.FC = () => {
   const progressStartRef = useRef<number>(0);
   const progressDurationRef = useRef<number>(35000);
   // Short URL token mapping for remote/base64 images pasted as HTML
-  const urlShortMapRef = useRef<Map<string, string>>(new Map()); // id -> url
-  const urlToShortRef = useRef<Map<string, string>>(new Map());  // url -> id
+  const urlShortMapRef = useRef<Map<string, string>>(new Map()); // shortKey -> url
+  const urlToShortRef = useRef<Map<string, string>>(new Map());  // url -> shortKey
   const urlShortCounterRef = useRef<number>(1);
+  const shortToLocalIdRef = useRef<Map<string, string>>(new Map()); // shortKey -> local image id
 
   // Check for API key on mount
   useEffect(() => {
@@ -82,16 +83,19 @@ const App: React.FC = () => {
     setIsFormatting(true);
     startFormattingProgress(45000);
     try {
-      // 在发送给模型前，将长的 {{IMGURL:...}} 统一压缩为 [[URL:n]]，并记录映射
-      const { compressedText } = compressImgUrlTokensInText(inputText);
+      // 在发送给模型前：
+      // 1) 将本地图片占位 {{IMG:...}} 统一规范为 [[IMAGE:...]]，减少模型误删概率
+      // 2) 将长的 {{IMGURL:...}} 统一压缩为 [[URL:n]]，并记录映射
+      const normalized = normalizeImgTokensInText(inputText);
+      const { compressedText } = compressImgUrlTokensInText(normalized);
       const html = await formatText(compressedText, selectedStyle);
-      // Ensure Tech Magazine style uses an OUTERMOST grid wrapper that WeChat preserves
+      // Ensure Tech Magazine style uses an OUTERMOST grid wrapper (WeChat-safe linear-gradient)
       if (selectedStyle === StyleType.TECH_MAG) {
         const trimmed = html.trimStart();
-        const startsWithGridWrapper = /^<section[^>]*repeating-linear-gradient\(/.test(trimmed);
-        const ensured = startsWithGridWrapper
+        const startsWithTechWrapper = /^<section[^>]*?(?:background-image\s*:\s*linear-gradient\(|background\s*:[^>]*linear-gradient\(|background-color\s*:\s*#?f7f7f7)[^>]*>/i.test(trimmed);
+        const ensured = startsWithTechWrapper
           ? trimmed
-          : `<section style="box-sizing: border-box; border-width: 0px; border-style: solid; border-color: rgb(229, 229, 229); color: rgb(10, 10, 10); font-style: normal; font-variant-ligatures: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; text-indent: 0px; text-transform: none; word-spacing: 0px; -webkit-text-stroke-width: 0px; white-space: normal; text-decoration-thickness: initial; text-decoration-style: initial; text-decoration-color: initial; text-align: left; line-height: 1.75; font-family: 'PingFang SC', -apple-system-font, BlinkMacSystemFont, 'Helvetica Neue', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', Arial, sans-serif; font-size: 15px; background: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px), repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px) rgba(0, 0, 0, 0.02); border-radius: 12px; padding: 8px; visibility: visible;">${trimmed}</section>`;
+          : `<section style="box-sizing: border-box; border-width: 0px; border-style: solid; border-color: rgb(229, 229, 229); color: rgb(10, 10, 10); font-style: normal; font-variant-ligatures: normal; font-variant-caps: normal; font-weight: 400; letter-spacing: normal; text-indent: 0px; text-transform: none; word-spacing: 0px; -webkit-text-stroke-width: 0px; white-space: normal; text-decoration-thickness: initial; text-decoration-style: initial; text-decoration-color: initial; text-align: left; line-height: 1.85; font-family: 'PingFang SC', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', Arial, sans-serif; font-size: 15px; background-color: #F7F7F7; background-image: linear-gradient(0deg, #E7E7E7 1px, transparent 1px), linear-gradient(90deg, #E7E7E7 1px, transparent 1px); background-size: 24px 24px; background-repeat: repeat; border-radius: 12px; padding: 12px; visibility: visible;">${trimmed}</section>`;
         setFormattedHtml(await replaceImagePlaceholders(ensured, selectedStyle));
       } else if (selectedStyle === StyleType.LITERARY) {
         // Ensure Literary style uses a soft paper-like background wrapper
@@ -141,8 +145,8 @@ const App: React.FC = () => {
         const current = prev || '';
         if (selectedStyle === StyleType.TECH_MAG) {
           const trimmed = current.trimStart();
-          // Detect outer grid wrapper
-          const match = trimmed.match(/^<section[^>]*repeating-linear-gradient\([^>]*\)>/);
+          // Detect outer tech wrapper with grid background
+          const match = trimmed.match(/^<section[^>]*?(?:background-image\s*:\s*linear-gradient\(|background\s*:[^>]*linear-gradient\(|background-color\s*:\s*#?f7f7f7)[^>]*>/i);
           if (match) {
             const openTagEnd = match[0].length; // position right after '>' of opening tag
             // If first child is already a cover section, replace it; else insert after opening wrapper
@@ -277,7 +281,13 @@ const App: React.FC = () => {
         if (f) files.push(f);
       }
     }
-    // Prefer full HTML conversion if present
+    // Prefer actual image files from clipboard (more reliable than HTML with blob: URLs)
+    if (files.length > 0) {
+      e.preventDefault();
+      await insertImagesAsTokens(files);
+      return;
+    }
+    // Otherwise, if HTML present, convert any <img src="..."> to short URL tokens
     const html = e.clipboardData?.getData('text/html');
     if (html && html.trim()) {
       e.preventDefault();
@@ -295,13 +305,6 @@ const App: React.FC = () => {
           textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
         }
       });
-      return;
-    }
-
-    // Fallback: handle pasted files
-    if (files.length > 0) {
-      e.preventDefault();
-      await insertImagesAsTokens(files);
       return;
     }
   };
@@ -340,8 +343,13 @@ const App: React.FC = () => {
           compressedSize,
           createdAt: Date.now(),
         }, blob);
-        // Insert token on a new line for clarity
-        const token = `\n{{IMG:${id}}}\n`;
+        // Create a local object URL for short placeholder mapping
+        const objectUrl = URL.createObjectURL(blob);
+        const shortKey = getOrAssignShortUrl(objectUrl);
+        // Remember this shortKey maps to a local image id so we can inline later
+        if (shortKey) shortToLocalIdRef.current.set(shortKey, id);
+        // Insert short URL token in the editor
+        const token = shortKey ? `\n[[URL:${shortKey}]]\n` : '';
         before += token;
       } catch (err) {
         console.error('Failed to handle image', err);
@@ -354,6 +362,15 @@ const App: React.FC = () => {
         const pos = before.length;
         textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
       }
+    });
+  }
+
+  function normalizeImgTokensInText(text: string): string {
+    if (!text) return text;
+    // {{IMG:...}} -> [[IMAGE:...]]
+    return text.replace(/\{\{\s*IMG\s*:\s*([^}]+)\}\}/gi, (_s, id) => {
+      const v = String(id || '').trim();
+      return v ? `[[IMAGE:${v}]]` : '';
     });
   }
 
@@ -509,7 +526,8 @@ const App: React.FC = () => {
              .replace(reShortUrl, (_s, key) => {
                const k = (key || '').trim();
                const real = urlShortMapRef.current.get(k) || '';
-               return imageBlockForStyle(style, null, real, real || null);
+               const localId = shortToLocalIdRef.current.get(k) || null;
+               return imageBlockForStyle(style, localId, real, real || null);
              });
 
     // 4) Strip dangling attribute text tails like:  src="" style="..." alt="image"/>
@@ -819,7 +837,7 @@ const App: React.FC = () => {
                     fontFamily: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif',
                     color: '#333',
                     ...(selectedStyle === StyleType.TECH_MAG
-                      ? { background: 'repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px), repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px) rgba(0, 0, 0, 0.02)', borderRadius: '12px' }
+                      ? { backgroundColor: '#F7F7F7', backgroundImage: "linear-gradient(0deg, #E7E7E7 1px, transparent 1px), linear-gradient(90deg, #E7E7E7 1px, transparent 1px)", backgroundSize: '24px 24px', backgroundRepeat: 'repeat', borderRadius: '12px' }
                       : { backgroundColor: '#fff' }),
                   }}
                   dangerouslySetInnerHTML={{ __html: formattedHtml }}
