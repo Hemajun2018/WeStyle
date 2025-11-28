@@ -83,10 +83,12 @@ const App: React.FC = () => {
     setIsFormatting(true);
     startFormattingProgress(45000);
     try {
+      // 0) 清理从 Word/Office 粘贴可能混入的 CSS/样式声明等噪音
+      const cleaned = cleanWordArtifactsInPlainText(inputText);
       // 在发送给模型前：
       // 1) 将本地图片占位 {{IMG:...}} 统一规范为 [[IMAGE:...]]，减少模型误删概率
       // 2) 将长的 {{IMGURL:...}} 统一压缩为 [[URL:n]]，并记录映射
-      const normalized = normalizeImgTokensInText(inputText);
+      const normalized = normalizeImgTokensInText(cleaned);
       const { compressedText } = compressImgUrlTokensInText(normalized);
       const html = await formatText(compressedText, selectedStyle);
       // Ensure Tech Magazine style uses an OUTERMOST grid wrapper (WeChat-safe linear-gradient)
@@ -114,7 +116,11 @@ const App: React.FC = () => {
           : `<section style="box-sizing: border-box; color: #24292f; line-height: 1.75; font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', Arial, sans-serif; font-size: 16px; background-color: #faf9f7; padding: 20px 16px;">${trimmed}</section>`;
         setFormattedHtml(await replaceImagePlaceholders(ensured, selectedStyle));
       } else {
-        setFormattedHtml(await replaceImagePlaceholders(html, selectedStyle));
+        let out = await replaceImagePlaceholders(html, selectedStyle);
+        if (selectedStyle === StyleType.ZEN) {
+          out = ensureZenDecorGif(out);
+        }
+        setFormattedHtml(out);
       }
     } catch (error) {
       handleApiError(error);
@@ -276,22 +282,21 @@ const App: React.FC = () => {
     const files: File[] = [];
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (it.kind === 'file' && it.type.startsWith('image/')) {
+      if (it.kind === 'file') {
         const f = it.getAsFile();
-        if (f) files.push(f);
+        if (f) {
+          // Accept all file items; we'll validate type later
+          files.push(f);
+        }
       }
     }
-    // Prefer actual image files from clipboard (more reliable than HTML with blob: URLs)
-    if (files.length > 0) {
-      e.preventDefault();
-      await insertImagesAsTokens(files);
-      return;
-    }
-    // Otherwise, if HTML present, convert any <img src="..."> to short URL tokens
     const html = e.clipboardData?.getData('text/html');
+    const plain = e.clipboardData?.getData('text/plain') || '';
+
+    // Unified path: if HTML exists, convert it, optionally consuming image files for Word's file:/blob: images
     if (html && html.trim()) {
       e.preventDefault();
-      const textWithTokens = htmlToTextWithImgTokens(html);
+      const textWithTokens = await htmlToTextWithImgTokensAsync(html, files);
       const ta = textareaRef.current;
       const start = ta?.selectionStart ?? inputText.length;
       const end = ta?.selectionEnd ?? inputText.length;
@@ -306,6 +311,33 @@ const App: React.FC = () => {
         }
       });
       return;
+    }
+
+    // No HTML — try to parse markdown-like image syntax from plain text (Word/WPS often yields '![](<file://...>)')
+    const hasMdImage = /!\[[^\]]*\]\([^\)]+\)/.test(plain || '');
+    if (hasMdImage) {
+      e.preventDefault();
+      const textWithTokens = await plainTextToTokensAsync(plain, files);
+      const ta = textareaRef.current;
+      const start = ta?.selectionStart ?? inputText.length;
+      const end = ta?.selectionEnd ?? inputText.length;
+      const before = inputText.slice(0, start);
+      const after = inputText.slice(end);
+      const next = before + textWithTokens + after;
+      setInputText(next);
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          const pos = before.length + textWithTokens.length;
+          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
+        }
+      });
+      return;
+    }
+
+    // No HTML and no markdown images — if we have image files, insert tokens; otherwise let default paste of plain text occur
+    if (files.length > 0) {
+      e.preventDefault();
+      await insertImagesAsTokens(files);
     }
   };
 
@@ -365,6 +397,22 @@ const App: React.FC = () => {
     });
   }
 
+  function cleanWordArtifactsInPlainText(text: string): string {
+    if (!text) return text;
+    let out = text;
+    // Remove common MS Word html/css fragments accidentally pasted as text
+    out = out.replace(/@font-face\s*\{[\s\S]*?\}\s*/gi, '');
+    out = out.replace(/@page[^\{]*\{[\s\S]*?\}\s*/gi, '');
+    out = out.replace(/@list[^\{]*\{[\s\S]*?\}\s*/gi, '');
+    // Any CSS block whose selector contains 'Mso'
+    out = out.replace(/(^|\n)[^{\n]*Mso[^\{]*\{[\s\S]*?\}\s*/gi, '$1');
+    // Section page mapping
+    out = out.replace(/div\.Section\d+\s*\{[\s\S]*?\}\s*/gi, '');
+    // Drop stray mso-* declarations left as plaintext
+    out = out.replace(/mso-[^:;\n]+:[^;\n]+;?/gi, '');
+    return out;
+  }
+
   function normalizeImgTokensInText(text: string): string {
     if (!text) return text;
     // {{IMG:...}} -> [[IMAGE:...]]
@@ -409,13 +457,26 @@ const App: React.FC = () => {
     return id;
   }
 
+  function createUnresolvedShortKey(): string {
+    const id = String(urlShortCounterRef.current++);
+    // Do not register urlToShort mapping; map id -> '' so renderer knows it's unresolved
+    urlShortMapRef.current.set(id, '');
+    return id;
+  }
+
   function htmlToTextWithImgTokens(html: string): string {
     const container = document.createElement('div');
     container.innerHTML = html;
+    // Strip Word/Office HEAD payload aggressively
+    for (const el of Array.from(container.querySelectorAll('style,script,meta,link,title,head'))) el.remove();
+
     const blocks = new Set(['P','DIV','SECTION','ARTICLE','HEADER','FOOTER','MAIN','ASIDE','H1','H2','H3','H4','H5','H6','UL','OL','LI','BLOCKQUOTE','PRE','TABLE','THEAD','TBODY','TR','TD','TH','HR','BR']);
+    const skipTags = new Set(['STYLE','SCRIPT','META','LINK','TITLE','HEAD','OBJECT','EMBED','IFRAME','NOSCRIPT']);
     let out = '';
 
     const walk = (node: Node) => {
+      // Ignore comments
+      if (node.nodeType === Node.COMMENT_NODE) return;
       if (node.nodeType === Node.TEXT_NODE) {
         const text = (node.textContent || '').replace(/[\t\r]+/g, ' ');
         out += text;
@@ -424,8 +485,15 @@ const App: React.FC = () => {
       if (node.nodeType !== Node.ELEMENT_NODE) return;
       const el = node as HTMLElement;
       const tag = el.tagName;
+      // Skip Office/Word noise: <style> et al, and namespaced tags like <o:p>
+      if (skipTags.has(tag)) return;
+      if (tag.includes(':')) return; // e.g., O:P, V:*, W:*
+
       if (tag === 'IMG') {
-        const src = el.getAttribute('src') || '';
+        let src = (el.getAttribute('src') || '').trim();
+        const dataSrc = (el.getAttribute('data-src') || '').trim();
+        // WeChat often sets a 1x1 svg to src and the real url in data-src
+        if ((!src || /^data:image\/svg\+xml/i.test(src)) && dataSrc) src = dataSrc;
         if (src) {
           const sid = getOrAssignShortUrl(src);
           if (sid) out += `\n[[URL:${sid}]]\n`;
@@ -439,6 +507,15 @@ const App: React.FC = () => {
       if (tag === 'LI') {
         out += '\n- ';
       }
+      // Word uses <p class="MsoListParagraph"> with bullet characters; treat as list-like
+      if (tag === 'P') {
+        const cls = (el.getAttribute('class') || '');
+        const style = (el.getAttribute('style') || '');
+        if (/MsoListParagraph/i.test(cls) || /mso-list/i.test(style)) {
+          if (!out.endsWith('\n')) out += '\n';
+          out += '- ';
+        }
+      }
       // Enter block: ensure newline separation
       if (blocks.has(tag)) {
         if (!out.endsWith('\n')) out += '\n';
@@ -449,9 +526,191 @@ const App: React.FC = () => {
       }
     };
     for (const child of Array.from(container.childNodes)) walk(child);
-    // Normalize newlines and spaces
-    out = out.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-    return out;
+    // Normalize newlines and spaces; strip leading Word CSS like @font-face that might have slipped through
+    out = out.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+    // Remove any stray @font-face or @page declarations if they ended up as text
+    out = out.replace(/@font-face\s*\{[\s\S]*?\}/gi, '')
+             .replace(/@page[^\n]*;?/gi, '')
+             .replace(/mso-[^:]+:[^;\n]+;?/gi, '');
+    return out.trim();
+  }
+
+  // Async variant that can consume pasted File images to replace Word's blob:/file: refs at the right positions
+  async function htmlToTextWithImgTokensAsync(html: string, pastedFiles: File[] = []): Promise<string> {
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    for (const el of Array.from(container.querySelectorAll('style,script,meta,link,title,head'))) el.remove();
+
+    const blocks = new Set(['P','DIV','SECTION','ARTICLE','HEADER','FOOTER','MAIN','ASIDE','H1','H2','H3','H4','H5','H6','UL','OL','LI','BLOCKQUOTE','PRE','TABLE','THEAD','TBODY','TR','TD','TH','HR','BR']);
+    const skipTags = new Set(['STYLE','SCRIPT','META','LINK','TITLE','HEAD','OBJECT','EMBED','IFRAME','NOSCRIPT']);
+    let out = '';
+    const fileQueue = [...pastedFiles];
+
+    const handleLocalImageFile = async (file: File): Promise<string> => {
+      try {
+        let blob: Blob;
+        let width = 0, height = 0;
+        let mimeType = file.type || '';
+        let originalSize = file.size;
+        let compressedSize = file.size;
+
+        if (mimeType && mimeType.startsWith('image/')) {
+          const res = await compressImage(file);
+          blob = res.blob; width = res.width; height = res.height; mimeType = res.mimeType; originalSize = res.originalSize; compressedSize = res.compressedSize;
+        } else {
+          // Unknown type: store original bytes and use objectURL; browsers可以嗅探类型
+          blob = file;
+        }
+
+        const id = generateImageId();
+        await imageStore.saveImage({ id, name: file.name || 'image', mimeType: mimeType || 'application/octet-stream', width, height, originalSize, compressedSize, createdAt: Date.now() }, blob);
+        const objectUrl = URL.createObjectURL(blob);
+        const shortKey = getOrAssignShortUrl(objectUrl);
+        if (shortKey) shortToLocalIdRef.current.set(shortKey, id);
+        return shortKey ? `\n[[URL:${shortKey}]]\n` : '';
+      } catch (e) {
+        console.error('Failed to process pasted image file', e);
+        return '';
+      }
+    };
+
+    const appendImgBySrc = async (src: string) => {
+      if (!src) return;
+      if (/^data:/i.test(src) || /^https?:/i.test(src)) {
+        const sid = getOrAssignShortUrl(src);
+        if (sid) out += `\n[[URL:${sid}]]\n`;
+        return;
+      }
+      if (/^(blob:|file:)/i.test(src)) {
+        if (fileQueue.length) {
+          out += await handleLocalImageFile(fileQueue.shift() as File);
+        } else {
+          // No file bytes available; still create an unresolved token to keep position
+          const sid = createUnresolvedShortKey();
+          out += `\n[[URL:${sid}]]\n`;
+        }
+        return;
+      }
+      // Relative or cid: references from Word/Outlook → try consuming a file; else create unresolved
+      if (/^(cid:|data:)/i.test(src) === false && !/^\w+:/.test(src)) {
+        if (fileQueue.length) {
+          out += await handleLocalImageFile(fileQueue.shift() as File);
+        } else {
+          const sid = createUnresolvedShortKey();
+          out += `\n[[URL:${sid}]]\n`;
+        }
+        return;
+      }
+      // otherwise ignore (non-loadable scheme)
+    };
+
+    const walk = async (node: Node) => {
+      if (node.nodeType === Node.COMMENT_NODE) return;
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = (node.textContent || '').replace(/[\t\r]+/g, ' ');
+        out += text;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const el = node as HTMLElement;
+      const tag = el.tagName;
+      if (skipTags.has(tag)) return;
+      // VML image: <v:imagedata src="..." o:href="..."/>
+      if (tag.includes(':')) {
+        const lower = tag.toLowerCase();
+        if (lower.endsWith(':imagedata')) {
+          const src = (el.getAttribute('src') || el.getAttribute('o:href') || '').trim();
+          await appendImgBySrc(src);
+          return;
+        }
+        return;
+      }
+
+      if (tag === 'IMG') {
+        let src = (el.getAttribute('src') || '').trim();
+        const dataSrc = (el.getAttribute('data-src') || '').trim();
+        if ((!src || /^data:image\/svg\+xml/i.test(src)) && dataSrc) src = dataSrc;
+        await appendImgBySrc(src);
+        return;
+      }
+      if (tag === 'BR' || tag === 'HR') {
+        out += '\n';
+        return;
+      }
+      if (tag === 'LI') out += '\n- ';
+      if (tag === 'P') {
+        const cls = (el.getAttribute('class') || '');
+        const style = (el.getAttribute('style') || '');
+        if (/MsoListParagraph/i.test(cls) || /mso-list/i.test(style)) {
+          if (!out.endsWith('\n')) out += '\n';
+          out += '- ';
+        }
+      }
+      if (blocks.has(tag)) { if (!out.endsWith('\n')) out += '\n'; }
+      for (const child of Array.from(el.childNodes)) await walk(child);
+      if (blocks.has(tag)) { if (!out.endsWith('\n')) out += '\n'; }
+    };
+    for (const child of Array.from(container.childNodes)) await walk(child);
+    out = out.replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+             .replace(/@font-face\s*\{[\s\S]*?\}/gi, '')
+             .replace(/@page[^\n]*;?/gi, '')
+             .replace(/mso-[^:]+:[^;\n]+;?/gi, '');
+    return out.trim();
+  }
+
+  async function plainTextToTokensAsync(text: string, pastedFiles: File[] = []): Promise<string> {
+    const fileQueue = [...pastedFiles];
+    const parts: string[] = [];
+    let last = 0;
+    const re = /!\[[^\]]*\]\(([^\)]+)\)/g; // markdown image
+
+    const handleLocalImageFile = async (file: File): Promise<string> => {
+      try {
+        let blob: Blob = file;
+        let width = 0, height = 0;
+        let mimeType = file.type || '';
+        let originalSize = file.size;
+        let compressedSize = file.size;
+        if (mimeType && mimeType.startsWith('image/')) {
+          const res = await compressImage(file);
+          blob = res.blob; width = res.width; height = res.height; mimeType = res.mimeType; originalSize = res.originalSize; compressedSize = res.compressedSize;
+        }
+        const id = generateImageId();
+        await imageStore.saveImage({ id, name: file.name || 'image', mimeType: mimeType || 'application/octet-stream', width, height, originalSize, compressedSize, createdAt: Date.now() }, blob);
+        const objectUrl = URL.createObjectURL(blob);
+        const shortKey = getOrAssignShortUrl(objectUrl);
+        if (shortKey) shortToLocalIdRef.current.set(shortKey, id);
+        return `[[URL:${shortKey}]]`;
+      } catch (e) {
+        console.error('Failed to process file from plain text', e);
+        return `[[URL:${createUnresolvedShortKey()}]]`;
+      }
+    };
+
+    const appendForSrc = async (src: string): Promise<string> => {
+      const s = src.trim();
+      // local id scheme
+      const m = s.match(/^img:\/\/(img-[a-z0-9\-]+)/i);
+      if (m) return `[[IMAGE:${m[1]}]]`;
+      if (/^data:/i.test(s) || /^https?:/i.test(s)) {
+        return `[[URL:${getOrAssignShortUrl(s)}]]`;
+      }
+      if (/^(blob:|file:)/i.test(s) || !/^\w+:/.test(s)) {
+        if (fileQueue.length) return await handleLocalImageFile(fileQueue.shift() as File);
+        return `[[URL:${createUnresolvedShortKey()}]]`;
+      }
+      return '';
+    };
+
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      parts.push(text.slice(last, m.index));
+      const token = await appendForSrc(m[1]);
+      parts.push(token);
+      last = m.index + m[0].length;
+    }
+    parts.push(text.slice(last));
+    return parts.join('');
   }
 
   async function replaceImagePlaceholders(html: string, style: StyleType): Promise<string> {
@@ -610,6 +869,9 @@ const App: React.FC = () => {
       case StyleType.CLAUDE:
         extraImg = 'box-shadow: 0 8px 32px rgba(193,95,60,0.12); border-radius: 12px;';
         break;
+      case StyleType.ZEN:
+        extraImg = 'border-radius: 0; box-shadow: none;';
+        break;
       case StyleType.LITERARY:
         extraWrap = 'padding: 6px; border: 1px solid #e6e6e6; border-radius: 6px; background: #fff;';
         break;
@@ -624,6 +886,42 @@ const App: React.FC = () => {
       return `<section style="${baseWrap} ${extraWrap}"><section style="font-size:12px;color:#9aa0a6;">[图片未找到]</section></section>`;
     }
     return `<section style="${baseWrap} ${extraWrap}"><img ${attrs.join(' ')} src="${src}" style="${baseImg} ${extraImg}" alt="image"/></section>`;
+  }
+
+  function ensureZenDecorGif(html: string): string {
+    const DECOR_URL = 'https://mmbiz.qpic.cn/mmbiz_gif/Lz789qfThgsibMHR1vh2lNxtrwwvkKgx8Rz9icxpg2iauzJKzbSh5QHbj2ghXCIzxVOv4WWibADeEnUkRvcaWkdjNQ/640?wx_fmt=gif';
+    try {
+      const container = document.createElement('div');
+      container.innerHTML = html;
+      const wrappers = Array.from(container.querySelectorAll('section,h2,h3')) as HTMLElement[];
+      for (const wrap of wrappers) {
+        const style = (wrap.getAttribute('style') || '').toLowerCase();
+        if (!/text-align\s*:\s*center/.test(style)) continue;
+        // Heuristic: a bold 16px span inside indicates Zen subtitle
+        const span = wrap.querySelector('span[style*="font-size: 16px" i]') as HTMLElement | null;
+        if (!span) continue;
+        const s2 = (span.getAttribute('style') || '').toLowerCase();
+        if (!/font-weight/.test(s2)) continue;
+        // Skip if already has our decor
+        const hasDecor = wrap.querySelector('img[data-zen-decor="1"]') || wrap.querySelector('svg');
+        if (hasDecor) continue;
+        const img = document.createElement('img');
+        img.setAttribute('data-zen-decor', '1');
+        img.setAttribute('alt', '');
+        img.setAttribute('src', DECOR_URL);
+        img.setAttribute('data-image-url', DECOR_URL);
+        img.setAttribute('style', 'width: 88px; height: auto; display: inline-block;');
+        // Insert at start
+        if (wrap.firstChild) wrap.insertBefore(img, wrap.firstChild);
+        else wrap.appendChild(img);
+        // Add a line break after the image if not present
+        const br = document.createElement('br');
+        wrap.insertBefore(br, img.nextSibling);
+      }
+      return container.innerHTML;
+    } catch {
+      return html;
+    }
   }
 
   async function inlineImagesAsBase64(html: string): Promise<string> {

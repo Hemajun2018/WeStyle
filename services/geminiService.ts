@@ -314,37 +314,33 @@ export const formatText = async (text: string, style: StyleType): Promise<string
       stylePrompt = `
         STYLE TARGET: "Zen Minimalist / 极简禅意风"
 
-        HTML TEMPLATE RULES:
-        1. **Global Settings**:
-           - Font: PingFangSC-light, sans-serif
-           - Line-height: 2.6 (Very airy)
-           - Letter-spacing: 2px (Wide spacing)
-           - Color: rgb(58, 58, 58)
-           - Font-size: 15px
+        HTML TEMPLATE RULES (WeChat-safe, inline styles only, single root wrapper):
+        1) GLOBAL CONTAINER (wrap everything once):
+           <section style="font-family: 'PingFangSC-light', -apple-system, BlinkMacSystemFont, Arial, sans-serif; font-size: 15px; color: rgb(58,58,58); line-height: 2.6; letter-spacing: 2px; text-align: justify;">
 
-        2. **Top Subtitle/Mood text** (Optional intro sentence):
-           <section style="margin: 12px 0 20px; text-align: center; font-size: 11px; color: rgb(160, 160, 160); letter-spacing: 5px;">
-             [Short Intro Sentence]
-           </section>
+        2) TITLE (if present):
+           <h1 style="text-align: center; font-size: 20px; line-height: 1.7; letter-spacing: 1px; font-weight: 700; margin: 10px 0 12px;">[Main Title]</h1>
 
-        3. **Numbered Headings** (Level 1/2):
-           <section style="text-align: center; margin-top: 40px; margin-bottom: 20px;">
-             <!-- Decorative separator (no <img>) -->
+        3) TOP SUBTITLE / MOOD (optional):
+           <section style="margin: 6px 0 22px; text-align: center; font-size: 11px; color: rgb(160,160,160); letter-spacing: 5px;">[Short intro]</section>
+
+        4) SECTION HEADING (centered with a subtle 88px separator — do NOT use <img> or <svg>):
+           <section style="text-align: center; margin-top: 40px; margin-bottom: 16px;">
              <section style="width: 88px; height: 6px; display: inline-block; vertical-align: middle; background: linear-gradient(90deg, rgba(0,0,0,0), rgba(0,0,0,0.25), rgba(0,0,0,0)); border-radius: 6px;"></section>
              <br>
-             <span style="font-size: 16px; font-weight: bold; color: rgb(58, 58, 58); letter-spacing: 2px; margin-top: 10px; display: inline-block;">01 [Heading Text]</span>
+             <span style="display: inline-block; margin-top: 8px; font-size: 16px; font-weight: 700; color: rgb(58,58,58); letter-spacing: 2px;">01 [Heading Text]</span>
            </section>
 
-        4. **Paragraphs**:
-           <section style="margin-bottom: 20px; text-align: justify; letter-spacing: 2px; line-height: 2.6;">
-             [Paragraph Content]
-           </section>
+        5) PARAGRAPHS (airy, justified):
+           <section style="margin-bottom: 18px;">[Paragraph text]</section>
 
-        5. **Footer / Author Box**:
-           <section style="margin-top: 40px; margin-bottom: 20px; text-align: center; opacity: 0.76;">
-             <section style="display: inline-block; border: 2px solid rgb(240, 240, 240); padding: 4px 12px; background-color: rgb(240, 240, 240); color: rgb(80, 80, 80); font-size: 11px; letter-spacing: 1px;">
-               [Author Name/Footer Text]
-             </section>
+        6) IMAGES (client resolves tokens; you may wrap token only):
+           <section style="margin: 20px 0; text-align: center;">[[URL:1]]</section>
+           <section style="margin: 20px 0; text-align: center;">[[IMAGE:img-...]]</section>
+
+        7) FOOTER / AUTHOR BOX (optional):
+           <section style="margin-top: 30px; margin-bottom: 10px; text-align: center; opacity: 0.86;">
+             <section style="display: inline-block; border: 2px solid rgb(240,240,240); padding: 2px 8px; background-color: rgb(240,240,240); color: rgb(80,80,80); font-size: 11px; letter-spacing: 1px;">[Footer text]</section>
            </section>
       `;
       break;
