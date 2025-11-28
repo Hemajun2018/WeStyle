@@ -329,8 +329,8 @@ export const formatText = async (text: string, style: StyleType): Promise<string
 
         3. **Numbered Headings** (Level 1/2):
            <section style="text-align: center; margin-top: 40px; margin-bottom: 20px;">
-             <!-- Specific dynamic wave separator -->
-             <img src="https://mmbiz.qpic.cn/mmbiz_gif/Lz789qfThgsibMHR1vh2lNxtrwwvkKgx8Rz9icxpg2iauzJKzbSh5QHbj2ghXCIzxVOv4WWibADeEnUkRvcaWkdjNQ/640?wx_fmt=gif" style="width: 88px; display: inline-block; vertical-align: middle;">
+             <!-- Decorative separator (no <img>) -->
+             <section style="width: 88px; height: 6px; display: inline-block; vertical-align: middle; background: linear-gradient(90deg, rgba(0,0,0,0), rgba(0,0,0,0.25), rgba(0,0,0,0)); border-radius: 6px;"></section>
              <br>
              <span style="font-size: 16px; font-weight: bold; color: rgb(58, 58, 58); letter-spacing: 2px; margin-top: 10px; display: inline-block;">01 [Heading Text]</span>
            </section>
@@ -458,13 +458,15 @@ export const formatText = async (text: string, style: StyleType): Promise<string
   }
 
   const IMAGE_TOKEN_RULES = `
-    IMAGE TOKEN RULES:
-    - The input may contain image tokens like {{IMG:img-<id>}}.
-    - Do NOT remove or reorder these tokens.
-    - At the exact token positions, output a standalone image block container in HTML, such as:
-      <section>[[IMAGE:img-<id>]]</section>
-    - Use exactly [[IMAGE:...]] placeholder inside the block; do not invent src. Keep everything else styled per the target rules.
-    - The input may also contain URL tokens like {{IMGURL:https://...}}. For these, KEEP THE TOKEN TEXT UNCHANGED at the exact position (do not convert it), so the client can resolve it.
+    IMAGE TOKEN RULES (STRICT):
+    - The input may contain image tokens like {{IMG:img-<id>}} and URL tokens like {{IMGURL:https://...}} OR short URL tokens like [[URL:1]], [[URL:2]], etc.
+    - Do NOT remove, reorder, or deduplicate these tokens.
+    - For {{IMG:img-<id>}}: At the exact token position, output a STANDALONE block containing ONLY the placeholder, e.g.:
+        <section>[[IMAGE:img-<id>]]</section>
+      where [[IMAGE:...]] is plain text (not inside any attribute).
+    - NEVER generate <img>, <figure>, <picture>, or any tag that sets an image src. Do not place [[IMAGE:...]] or {{IMGURL:...}} inside any HTML attribute.
+    - For {{IMGURL:https://...}} and [[URL:n]]: KEEP THE TOKEN TEXT UNCHANGED at the exact position (do not convert it or wrap it in <img>); the client will resolve it.
+    - Do NOT invent, add, or remove any image references beyond the given tokens.
   `;
 
   const prompt = `

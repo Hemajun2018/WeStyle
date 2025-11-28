@@ -18,10 +18,21 @@ const App: React.FC = () => {
   const [isFormatting, setIsFormatting] = useState(false);
   const [isGeneratingCover, setIsGeneratingCover] = useState(false);
   const [isGeneratingIllustration, setIsGeneratingIllustration] = useState(false);
+  // Progress state for formatting
+  const [progressActive, setProgressActive] = useState(false);
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressLabel, setProgressLabel] = useState<string>('');
 
   // Refs for auto-scrolling
   const previewRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const progressTimerRef = useRef<number | null>(null);
+  const progressStartRef = useRef<number>(0);
+  const progressDurationRef = useRef<number>(35000);
+  // Short URL token mapping for remote/base64 images pasted as HTML
+  const urlShortMapRef = useRef<Map<string, string>>(new Map()); // id -> url
+  const urlToShortRef = useRef<Map<string, string>>(new Map());  // url -> id
+  const urlShortCounterRef = useRef<number>(1);
 
   // Check for API key on mount
   useEffect(() => {
@@ -69,8 +80,11 @@ const App: React.FC = () => {
   const handleFormat = async () => {
     if (!inputText.trim()) return;
     setIsFormatting(true);
+    startFormattingProgress(45000);
     try {
-      const html = await formatText(inputText, selectedStyle);
+      // 在发送给模型前，将长的 {{IMGURL:...}} 统一压缩为 [[URL:n]]，并记录映射
+      const { compressedText } = compressImgUrlTokensInText(inputText);
+      const html = await formatText(compressedText, selectedStyle);
       // Ensure Tech Magazine style uses an OUTERMOST grid wrapper that WeChat preserves
       if (selectedStyle === StyleType.TECH_MAG) {
         const trimmed = html.trimStart();
@@ -102,6 +116,7 @@ const App: React.FC = () => {
       handleApiError(error);
     } finally {
       setIsFormatting(false);
+      completeFormattingProgress();
     }
   };
 
@@ -352,7 +367,10 @@ const App: React.FC = () => {
     const end = ta?.selectionEnd ?? inputText.length;
     const before = inputText.slice(0, start);
     const after = inputText.slice(end);
-    const tokens = urls.map(u => `\n{{IMGURL:${u}}}\n`).join('');
+    const tokens = urls.map(u => {
+      const sid = getOrAssignShortUrl(u);
+      return sid ? `\n[[URL:${sid}]]\n` : '';
+    }).join('');
     const next = before + tokens + after;
     setInputText(next);
     requestAnimationFrame(() => {
@@ -361,6 +379,17 @@ const App: React.FC = () => {
         textareaRef.current.selectionStart = textareaRef.current.selectionEnd = pos;
       }
     });
+  }
+
+  function getOrAssignShortUrl(url: string): string {
+    const u = (url || '').trim();
+    if (!u) return '';
+    const existed = urlToShortRef.current.get(u);
+    if (existed) return existed;
+    const id = String(urlShortCounterRef.current++);
+    urlToShortRef.current.set(u, id);
+    urlShortMapRef.current.set(id, u);
+    return id;
   }
 
   function htmlToTextWithImgTokens(html: string): string {
@@ -380,7 +409,10 @@ const App: React.FC = () => {
       const tag = el.tagName;
       if (tag === 'IMG') {
         const src = el.getAttribute('src') || '';
-        if (src) out += `\n{{IMGURL:${src}}}\n`;
+        if (src) {
+          const sid = getOrAssignShortUrl(src);
+          if (sid) out += `\n[[URL:${sid}]]\n`;
+        }
         return;
       }
       if (tag === 'BR' || tag === 'HR') {
@@ -406,18 +438,51 @@ const App: React.FC = () => {
   }
 
   async function replaceImagePlaceholders(html: string, style: StyleType): Promise<string> {
-    // Support both [[IMAGE:img-..]] from formatter and {{IMG:img-..}} tokens
+    // 0) Normalize common model quirks first
+    let pre = html;
+    //    a) Any <img ... [[IMAGE:...]] ...> → [[IMAGE:...]]
+    pre = pre.replace(/<img[^>]*?(\[\[\s*image\s*:\s*([^\]]+?)\s*\]\])[^>]*?>/gi, (_s, _wholeToken, gid) => `[[IMAGE:${gid}]]`);
+    //    b) Any <img ... {{IMG:...}} ...> → {{IMG:...}}
+    pre = pre.replace(/<img[^>]*?(\{\{\s*img\s*:\s*([^}]+?)\s*\}\})[^>]*?>/gi, (_s, wholeToken) => wholeToken);
+    //    c) Any <img ... {{IMGURL:...}} ...> → {{IMGURL:...}}
+    pre = pre.replace(/<img[^>]*?(\{\{\s*imgurl\s*:\s*([^}]+?)\s*\}\})[^>]*?>/gi, (_s, wholeToken) => wholeToken);
+    //    d) Any <img ... [[URL:...]] ...> → [[URL:...]]
+    pre = pre.replace(/<img[^>]*?(\[\[\s*url\s*:\s*([^\]]+?)\s*\]\])[^>]*?>/gi, (_s, wholeToken) => wholeToken);
+    //    d) Remove artefacts like "[image 1024x768 PNG]"
+    pre = pre.replace(/\[\s*image[^\]]*\]/gi, '');
+    //    e) Remove empty-src <img> outright to avoid broken icons
+    pre = pre.replace(/<img\b[^>]*?\bsrc\s*=\s*["']\s*["'][^>]*>/gi, '');
+
+    // 1) Collect tokens with tolerant, case-insensitive patterns and optional spaces
     const ids = new Set<string>();
     const urlTokens: Array<string> = [];
-    const re1 = /\[\[IMAGE:([^\]]+)\]\]/g;
-    const re2 = /\{\{IMG:([^}]+)\}\}/g;
-    const reUrl = /\{\{IMGURL:([^}]+)\}\}/g;
+    const re1 = /\[\[\s*image\s*:\s*([^\]]+?)\s*\]\]/gi;      // [[IMAGE:id]] tolerant
+    const re2 = /\{\{\s*img\s*:\s*([^}]+?)\s*\}\}/gi;           // {{IMG:id}}
+    const reUrl = /\{\{\s*imgurl\s*:\s*([^}]+?)\s*\}\}/gi;      // {{IMGURL:url}}
+    const reShortUrl = /\[\[\s*url\s*:\s*([^\]]+?)\s*\]\]/gi;  // [[URL:n]]
     let m: RegExpExecArray | null;
-    while ((m = re1.exec(html))) ids.add(m[1]);
-    while ((m = re2.exec(html))) ids.add(m[1]);
-    while ((m = reUrl.exec(html))) urlTokens.push(m[1]);
-    if (ids.size === 0 && urlTokens.length === 0) return html;
+    while ((m = re1.exec(pre))) ids.add((m[1] || '').trim());
+    while ((m = re2.exec(pre))) ids.add((m[1] || '').trim());
+    while ((m = reUrl.exec(pre))) urlTokens.push((m[1] || '').trim());
+    // Collect short-url occurrences and resolve to actual URL
+    const shortUrlTokens: Array<{ key: string; url: string }> = [];
+    while ((m = reShortUrl.exec(pre))) {
+      const key = (m[1] || '').trim();
+      if (!key) continue;
+      const real = urlShortMapRef.current.get(key);
+      if (real) shortUrlTokens.push({ key, url: real });
+    }
 
+    // 1.5) Fast path: if nothing to do, still strip dangling attribute tails and incomplete endings
+    if (ids.size === 0 && urlTokens.length === 0 && shortUrlTokens.length === 0) {
+      let fast = stripDanglingAttributeTails(pre);
+      fast = dropTrailingIncompleteTokens(fast);
+      // Also sanitize empty/broken <img> via DOM
+      fast = sanitizeImageHtml(fast);
+      return fast;
+    }
+
+    // 2) Resolve local image ids to object URLs
     const urlMap = new Map<string, string>();
     for (const id of ids) {
       try {
@@ -436,11 +501,82 @@ const App: React.FC = () => {
       return imageBlockForStyle(style, id, src, null);
     };
 
-    let out = html;
-    out = out.replace(re1, (_s, gid) => buildBlock(gid));
-    out = out.replace(re2, (_s, gid) => buildBlock(gid));
-    out = out.replace(reUrl, (_s, gurl) => imageBlockForStyle(style, null, gurl, gurl));
+    // 3) Replace tokens to styled blocks
+    let out = pre;
+    out = out.replace(re1, (_s, gid) => buildBlock((gid || '').trim()))
+             .replace(re2, (_s, gid) => buildBlock((gid || '').trim()))
+             .replace(reUrl, (_s, gurl) => imageBlockForStyle(style, null, (gurl || '').trim(), (gurl || '').trim()))
+             .replace(reShortUrl, (_s, key) => {
+               const k = (key || '').trim();
+               const real = urlShortMapRef.current.get(k) || '';
+               return imageBlockForStyle(style, null, real, real || null);
+             });
+
+    // 4) Strip dangling attribute text tails like:  src="" style="..." alt="image"/>
+    out = stripDanglingAttributeTails(out);
+
+    // 5) Drop trailing incomplete tokens/tags produced by truncation
+    out = dropTrailingIncompleteTokens(out);
+
+    // 6) DOM sanitize: remove any remaining empty-src <img>, normalize
+    out = sanitizeImageHtml(out);
+
     return out;
+  }
+
+  function compressImgUrlTokensInText(text: string): { compressedText: string } {
+    if (!text) return { compressedText: text };
+    const re = /\{\{\s*IMGURL\s*:\s*([^}]+)\}\}/gi;
+    let out = text.replace(re, (_s, url) => {
+      const u = String(url || '').trim();
+      if (!u) return '';
+      const sid = getOrAssignShortUrl(u);
+      return sid ? `[[URL:${sid}]]` : '';
+    });
+    return { compressedText: out };
+  }
+
+  function stripDanglingAttributeTails(s: string): string {
+    // Remove common attribute tail leftovers that appear as plain text after replacing <img ...[[IMAGE]]...>
+    // Examples to remove:  ' src="" style="..." alt="image"/>'  or  ' src=""/>'  or variant spacing
+    let out = s.replace(/[\s\u00A0]src\s*=\s*(["'])\s*\1[^<>]*\/>/gi, '');
+    // Also remove bare attribute chains not necessarily ending with '/>' (very conservative)
+    out = out.replace(/[\s\u00A0]src\s*=\s*(["'])\s*\1[^<>]*(?=$)/gi, '');
+    return out;
+  }
+
+  function dropTrailingIncompleteTokens(s: string): string {
+    let out = s;
+    // Cut off trailing incomplete [[IMAGE: ...
+    out = out.replace(/\[\[\s*image\s*:[^\]]*$/i, '');
+    // Cut off trailing incomplete {{IMG: ... or {{IMGURL:
+    out = out.replace(/\{\{\s*img(?:url)?\s*:[^}]*$/i, '');
+    // Cut off trailing incomplete <img...
+    out = out.replace(/<img[^>]*$/i, '');
+    return out;
+  }
+
+  function sanitizeImageHtml(html: string): string {
+    try {
+      const container = document.createElement('div');
+      container.innerHTML = html;
+      const imgs = Array.from(container.querySelectorAll('img')) as HTMLImageElement[];
+      for (const img of imgs) {
+        const src = (img.getAttribute('src') || '').trim();
+        // Remove images with empty or placeholder-like src
+        if (!src || src === 'about:blank' || /^\[\[\s*image\s*:/i.test(src) || /^\{\{\s*img/i.test(src)) {
+          img.remove();
+          continue;
+        }
+        // Also drop clearly broken data URLs with just prefix
+        if (/^data:\s*$/i.test(src)) {
+          img.remove();
+        }
+      }
+      return container.innerHTML;
+    } catch {
+      return html;
+    }
   }
 
   function imageBlockForStyle(style: StyleType, id: string | null, src: string, remoteUrl: string | null) {
@@ -465,6 +601,10 @@ const App: React.FC = () => {
     const attrs: string[] = [];
     if (id) attrs.push(`data-image-id=\"${id}\"`);
     if (remoteUrl) attrs.push(`data-image-url=\"${remoteUrl}\"`);
+    if (!src) {
+      // Avoid broken-image icon if we didn't resolve a src
+      return `<section style="${baseWrap} ${extraWrap}"><section style="font-size:12px;color:#9aa0a6;">[图片未找到]</section></section>`;
+    }
     return `<section style="${baseWrap} ${extraWrap}"><img ${attrs.join(' ')} src="${src}" style="${baseImg} ${extraImg}" alt="image"/></section>`;
   }
 
@@ -507,6 +647,10 @@ const App: React.FC = () => {
 
   async function fetchToBase64(url: string): Promise<string | null> {
     try {
+      if (/^data:/i.test(url)) {
+        // Already a data URI
+        return url;
+      }
       const res = await fetch(url, { mode: 'cors', cache: 'default' });
       if (!res.ok) return null;
       const blob = await res.blob();
@@ -516,135 +660,183 @@ const App: React.FC = () => {
     }
   }
 
+  // --- Formatting progress helpers ---
+  function startFormattingProgress(durationMs: number) {
+    // Clear previous
+    if (progressTimerRef.current) window.clearInterval(progressTimerRef.current);
+    progressStartRef.current = Date.now();
+    progressDurationRef.current = durationMs;
+    setProgressActive(true);
+    setProgressPercent(0);
+    setProgressLabel('正在理解文章内容…');
+
+    progressTimerRef.current = window.setInterval(() => {
+      const now = Date.now();
+      const elapsed = now - progressStartRef.current;
+      const d = progressDurationRef.current;
+      const t = Math.max(0, Math.min(1, elapsed / d));
+
+      // Piecewise curve: fast start -> moderate -> slow after 90%
+      // 0 - 40% time: 0% -> 70% (easeOut)
+      // 40% - 80% time: 70% -> 90% (easeInOut)
+      // 80% - 100% time: 90% -> 98% (easeIn, very slow)
+      const easeOut = (x: number) => 1 - Math.pow(1 - x, 2);
+      const easeInOut = (x: number) => x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+      const easeIn = (x: number) => x * x;
+
+      let target = 0;
+      if (t <= 0.4) {
+        target = 0 + 70 * easeOut(t / 0.4);
+      } else if (t <= 0.8) {
+        target = 70 + 20 * easeInOut((t - 0.4) / 0.4);
+      } else {
+        target = 90 + 8 * easeIn((t - 0.8) / 0.2);
+      }
+
+      // After expected duration, creep from ~98 -> 99 slowly
+      if (elapsed > d) {
+        const over = Math.min(1, (elapsed - d) / 5000); // 5s to gain +1%
+        target = Math.min(99, target + over);
+      }
+
+      const targetInt = Math.floor(target);
+      setProgressPercent((prev) => (targetInt > prev ? targetInt : prev));
+      setProgressLabel(labelForTime(elapsed, d));
+    }, 200);
+  }
+
+  function completeFormattingProgress() {
+    if (progressTimerRef.current) {
+      window.clearInterval(progressTimerRef.current);
+      progressTimerRef.current = null;
+    }
+    setProgressPercent(100);
+    setProgressLabel('完成排版');
+    // small delay then hide
+    setTimeout(() => {
+      setProgressActive(false);
+      setProgressPercent(0);
+      setProgressLabel('');
+    }, 800);
+  }
+
+  function labelForTime(elapsed: number, duration: number) {
+    const r = Math.max(0, Math.min(1, elapsed / duration));
+    if (r < 0.15) return '正在理解文章内容…';
+    if (r < 0.35) return '正在分析文章结构…';
+    if (r < 0.55) return '正在匹配风格模板…';
+    if (r < 0.75) return '正在生成排版与段落…';
+    if (r < 0.9)  return '正在插入图片与装饰…';
+    return '正在优化细节…';
+  }
+
   return (
-    <div className="min-h-screen flex flex-col md:flex-row font-sans text-ink-900 bg-paper-50">
-
-      {/* Left Panel: Input */}
-      <div className="w-full md:w-5/12 p-6 flex flex-col border-r border-gray-200 bg-white z-20 shadow-xl h-screen overflow-y-auto">
-        <header className="mb-6 flex justify-between items-start">
-          <div>
-            <h1 className="text-2xl font-serif font-bold text-ink-900 mb-1 tracking-tight">
-              MuseFlow Typesetter
-            </h1>
-            <p className="text-xs text-gray-500 uppercase tracking-widest">
-              AI 驱动的公众号排版引擎
-            </p>
+    <div className="bg-[var(--background-primary,#f5f5f7)] text-[var(--text-charcoal,#333)] min-h-screen w-full flex flex-col overflow-hidden">
+      {/* Header */}
+      <header className="flex items-center justify-between border-b border-[var(--border-color,#e5e7eb)] px-6 py-3 shrink-0 bg-white">
+        <div className="flex items-center gap-3">
+          <div className="text-[var(--accent-color,#5c7c68)] w-6 h-6">
+            <svg fill="none" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg"><g clipPath="url(#c)"><path d="M8.58 8.58A23 23 0 0 0 2.61 19.75a23 23 0 0 0 1.24 12.6A23 23 0 0 0 24 45.81a23 23 0 0 0 12.12-3.68 23 23 0 0 0 8.03-9.78 23 23 0 0 0 1.24-12.6 23 23 0 0 0-5.97-11.17L24 24 8.58 8.58Z" fill="currentColor"/></g><defs><clipPath id="c"><path fill="#fff" d="M0 0h48v48H0z"/></clipPath></defs></svg>
           </div>
-          {/* 移除在线更换 Key 的入口，改为仅通过服务器端环境变量配置 */}
-        </header>
-
-        {/* Input Area */}
-        <div className="flex-1 flex flex-col min-h-[200px] mb-6">
-          <label className="block text-xs font-bold text-gray-400 mb-2 uppercase tracking-wider">文章正文</label>
-          <textarea
-            className="flex-1 w-full p-4 border border-gray-200 rounded-lg resize-none focus:ring-2 focus:ring-ink-900 focus:border-transparent outline-none transition-all bg-gray-50 font-serif text-base leading-relaxed placeholder-gray-400 shadow-inner"
-            placeholder="粘贴您的文章内容到这里..."
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            onPaste={handlePaste}
-            onDrop={handleDrop}
-            onDragOver={(e) => e.preventDefault()}
-            ref={textareaRef}
-          />
+          <h1 className="text-lg font-bold tracking-tight">Museflow</h1>
         </div>
-        {/* Secondary Actions (可选功能保持在左侧) */}
-        {enableImageFeatures && (
-          <div className="grid grid-cols-2 gap-3">
-            <Button 
-              variant="secondary" 
-              onClick={handleGenerateCover} 
-              isLoading={isGeneratingCover}
-              disabled={!inputText}
-              className="text-xs"
-            >
-              AI 生成封面
-            </Button>
+      </header>
 
-            <Button 
-              variant="secondary" 
-              onClick={handleSmartIllustration} 
-              isLoading={isGeneratingIllustration}
-              disabled={!formattedHtml}
-              className="text-xs"
-            >
-              智能分析配图
+      {/* Main Grid */}
+      <main className="flex-1 grid grid-cols-12 gap-6 p-6 overflow-hidden">
+        {/* Left: Input */}
+        <section className="col-span-12 md:col-span-4 flex flex-col h-full bg-white rounded-xl border border-[var(--border-color,#e5e7eb)]">
+          <div className="flex flex-col p-4 flex-1">
+            <label className="flex flex-col flex-1 h-full">
+              <p className="text-base font-medium pb-3">在此处粘贴您的文章内容...</p>
+              <textarea
+                className="form-input flex w-full flex-1 resize-none overflow-auto rounded-lg focus:outline-0 focus:ring-0 border border-[var(--border-color,#e5e7eb)] bg-[var(--background-primary,#f5f5f7)] focus:border-[var(--accent-color,#5c7c68)] placeholder:text-gray-400 p-4 text-base leading-relaxed custom-scrollbar"
+                placeholder="开始你的创作之旅，将文字粘贴于此，让AI赋予它新的生命。"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onPaste={handlePaste}
+                onDrop={handleDrop}
+                onDragOver={(e) => e.preventDefault()}
+                ref={textareaRef}
+              />
+            </label>
+            <div className="flex items-center justify-between pt-3 text-sm text-gray-500">
+              <span>字数: {inputText.length}</span>
+              {enableImageFeatures && (
+                <div className="hidden md:flex gap-2">
+                  <Button variant="secondary" onClick={handleGenerateCover} isLoading={isGeneratingCover} disabled={!inputText} className="!h-8 !py-1 !px-3 !text-xs">AI 生成封面</Button>
+                  <Button variant="secondary" onClick={handleSmartIllustration} isLoading={isGeneratingIllustration} disabled={!formattedHtml} className="!h-8 !py-1 !px-3 !text-xs">智能分析配图</Button>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        {/* Middle: Style Picker */}
+        <section className="col-span-12 md:col-span-3 flex flex-col h-full bg-white rounded-xl border border-[var(--border-color,#e5e7eb)] overflow-hidden">
+          <div className="p-4 border-b border-[var(--border-color,#e5e7eb)]"><h3 className="text-lg font-bold">选择一个风格</h3></div>
+          <div className="flex-1 p-4 overflow-y-auto custom-scrollbar">
+            <StyleSelector selected={selectedStyle} onSelect={setSelectedStyle} />
+          </div>
+          <div className="p-4 mt-auto">
+            <Button onClick={handleFormat} isLoading={isFormatting} className="flex w-full h-12 !rounded-lg !bg-[var(--accent-color,#5c7c68)] hover:!bg-[var(--accent-color,#5c7c68)]/90 font-bold">
+              一键AI排版
             </Button>
           </div>
-        )}
-      </div>
+        </section>
 
-      {/* Middle Panel: Style Picker */}
-      <div className="w-full md:w-3/12 p-6 bg-white h-screen overflow-y-auto border-r border-gray-200">
-        <div className="sticky top-0 bg-white pb-4 z-10">
-          <h3 className="text-sm font-bold text-gray-700">选择一个风格</h3>
-        </div>
-        <div className="pt-2">
-          <StyleSelector selected={selectedStyle} onSelect={setSelectedStyle} />
-        </div>
-      </div>
-
-      {/* Right Panel: Preview */}
-      <div className="w-full md:w-4/12 bg-[#f5f5f7] flex flex-col h-screen overflow-hidden relative">
-        <div className="h-14 border-b border-gray-200 bg-white flex justify-between items-center px-4 md:px-6 shadow-sm z-10 shrink-0">
-          <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center">
-            <span className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></span>
-            实时预览
-          </h2>
-          <div className="flex items-center gap-2">
-            <Button 
-              onClick={handleFormat} 
-              isLoading={isFormatting}
-              className="!py-1.5 !px-4 !text-xs bg-ink-900 hover:bg-black text-white rounded-full"
-              icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>}
-            >
-              一键排版
-            </Button>
-            <Button 
+        {/* Right: Preview */}
+        <section className="col-span-12 md:col-span-5 flex flex-col h-full bg-white rounded-xl border border-[var(--border-color,#e5e7eb)] overflow-hidden">
+          <div className="flex items-center justify-between p-4 border-b border-[var(--border-color,#e5e7eb)]">
+            <h3 className="text-lg font-bold">排版预览</h3>
+            <Button
               variant="primary"
               onClick={handleCopyToWeChat}
               disabled={!formattedHtml}
-              className="!py-1.5 !px-4 !text-xs bg-green-600 hover:bg-green-700 border-none rounded-full"
-              icon={<svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"></path></svg>}
+              className="!h-10 !rounded-lg !bg-[var(--background-primary,#f5f5f7)] hover:!bg-[var(--border-color,#e5e7eb)] !text-[var(--text-charcoal,#333)] !text-sm"
             >
               复制到公众号
             </Button>
           </div>
-        </div>
-
-        {/* Preview Container - Designed to mimic mobile phone width */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 flex justify-center">
-          {formattedHtml ? (
-             <div className="w-full max-w-[450px] bg-white min-h-[800px] h-fit shadow-2xl relative animate-in fade-in duration-500">
-               {/* This div mimics the WeChat webview container */}
-               <div 
+          {progressActive && (
+            <div className="px-4 py-2 bg-[var(--background-primary,#f5f5f7)] border-b border-[var(--border-color,#e5e7eb)]">
+              <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                <span>{progressLabel}</span>
+                <span>{progressPercent}%</span>
+              </div>
+              <div className="h-2 bg-gray-100 rounded overflow-hidden">
+                <div className="h-full bg-[var(--accent-color,#5c7c68)] transition-all duration-200" style={{ width: `${progressPercent}%` }} />
+              </div>
+            </div>
+          )}
+          <div className="flex-1 overflow-y-auto p-6 bg-[var(--background-primary,#f5f5f7)] custom-scrollbar">
+            {formattedHtml ? (
+              <div className="w-full max-w-[680px] mx-auto bg-white rounded-xl shadow relative">
+                <div
                   ref={previewRef}
                   style={{
                     padding: '20px 16px 40px 16px',
                     fontFamily: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif',
                     color: '#333',
-                    // Apply tech-mag grid background when that style is selected
                     ...(selectedStyle === StyleType.TECH_MAG
-                      ? {
-                          background:
-                            'repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px), repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px) rgba(0, 0, 0, 0.02)',
-                          borderRadius: '12px',
-                        }
+                      ? { background: 'repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px), repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.05) 0px, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 32px) rgba(0, 0, 0, 0.02)', borderRadius: '12px' }
                       : { backgroundColor: '#fff' }),
                   }}
                   dangerouslySetInnerHTML={{ __html: formattedHtml }}
-               />
-             </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center text-gray-400 h-full w-full max-w-md border-2 border-dashed border-gray-300 rounded-xl m-8">
-              <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-4 text-gray-300">
-                <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"></path></svg>
+                />
               </div>
-              <p className="text-sm font-medium">输入文章并选择风格开始排版</p>
-              <p className="text-xs mt-2 opacity-60">点击右上角一键排版，支持复制到公众号</p>
-            </div>
-          )}
-        </div>
-      </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center text-gray-500 h-full w-full max-w-md mx-auto">
+                <div className="w-24 h-24 bg-white rounded-full flex items-center justify-center mb-6">
+                  <svg className="w-12 h-12 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19 20H5a2 2 0 01-2-2V6a2 2 0 012-2h10a2 2 0 012 2v1m2 13a2 2 0 01-2-2V7m2 13a2 2 0 002-2V9a2 2 0 00-2-2h-2m-4-3H9M7 16h6M7 8h6v4H7V8z"/></svg>
+                </div>
+                <h4 className="text-xl font-bold mb-2">您的文章预览将在此呈现</h4>
+                <p className="text-gray-400 max-w-xs text-center">在左侧输入内容，选择一种风格，然后点击“一键AI排版”开始创作。</p>
+              </div>
+            )}
+          </div>
+        </section>
+      </main>
     </div>
   );
 };
