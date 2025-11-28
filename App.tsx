@@ -749,7 +749,7 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="bg-[var(--background-primary,#f5f5f7)] text-[var(--text-charcoal,#333)] min-h-screen w-full flex flex-col overflow-hidden">
+    <div className="bg-[var(--background-primary,#f5f5f7)] text-[var(--text-charcoal,#333)] h-screen w-full flex flex-col overflow-hidden">
       {/* Header */}
       <header className="flex items-center justify-between border-b border-[var(--border-color,#e5e7eb)] px-6 py-3 shrink-0 bg-white">
         <div className="flex items-center gap-3">
