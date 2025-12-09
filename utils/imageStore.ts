@@ -9,7 +9,7 @@ export interface StoredImageMeta {
   createdAt: number;
 }
 
-const DB_NAME = 'MuseFlowImages';
+const DB_NAME = 'EasyPubImages';
 const STORE_NAME = 'images';
 const DB_VERSION = 1;
 
@@ -44,6 +44,22 @@ export class ImageStore {
     });
   }
 
+  // Overload-friendly: allow saving original blob along with preview blob
+  async saveImageWithOriginal(meta: StoredImageMeta, previewBlob: Blob, originalBlob?: Blob | null): Promise<void> {
+    await this.init();
+    const db = this.db!;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const value: any = { ...meta, blob: previewBlob };
+      if (originalBlob) value.origBlob = originalBlob;
+      store.put(value);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
   async getImageBlob(id: string): Promise<Blob | null> {
     await this.init();
     const db = this.db!;
@@ -54,6 +70,21 @@ export class ImageStore {
       req.onsuccess = () => {
         const v = req.result;
         resolve(v?.blob || null);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async getImageOriginalBlob(id: string): Promise<Blob | null> {
+    await this.init();
+    const db = this.db!;
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.get(id);
+      req.onsuccess = () => {
+        const v = req.result;
+        resolve(v?.origBlob || v?.blob || null);
       };
       req.onerror = () => reject(req.error);
     });
@@ -78,4 +109,3 @@ export class ImageStore {
 }
 
 export const imageStore = new ImageStore();
-

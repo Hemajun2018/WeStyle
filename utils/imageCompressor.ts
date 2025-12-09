@@ -26,11 +26,24 @@ export async function compressImage(file: File, opts: CompressOptions = {}): Pro
   const dataUrl = await fileToDataURL(file);
   const img = await loadImage(dataUrl);
 
-  const { width, height } = constrainSize(img.naturalWidth || img.width, img.naturalHeight || img.height, maxWidth, maxHeight);
+  const naturalWidth = img.naturalWidth || (img as any).width;
+  const naturalHeight = img.naturalHeight || (img as any).height;
+  const { width, height } = constrainSize(naturalWidth, naturalHeight, maxWidth, maxHeight);
+
+  // Dual-track friendly tweak: if no downscale is needed, avoid re-encoding to preserve crispness in preview too
+  if (width === naturalWidth && height === naturalHeight) {
+    return { blob: file, width: naturalWidth, height: naturalHeight, mimeType: mime, originalSize, compressedSize: originalSize };
+  }
+
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d')!;
+  // Ensure high-quality resampling
+  try {
+    (ctx as any).imageSmoothingEnabled = true;
+    (ctx as any).imageSmoothingQuality = 'high';
+  } catch {}
 
   if (targetMime === 'image/jpeg') {
     // Fill white background for JPEG to avoid black in transparent areas
@@ -44,7 +57,7 @@ export async function compressImage(file: File, opts: CompressOptions = {}): Pro
 
   // If compression is larger, fallback to original
   if (compressedSize > originalSize) {
-    return { blob: file, width: img.naturalWidth || img.width, height: img.naturalHeight || img.height, mimeType: mime, originalSize, compressedSize: originalSize };
+    return { blob: file, width: naturalWidth, height: naturalHeight, mimeType: mime, originalSize, compressedSize: originalSize };
   }
   return { blob, width, height, mimeType: targetMime, originalSize, compressedSize };
 }
@@ -75,4 +88,3 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.src = src;
   });
 }
-

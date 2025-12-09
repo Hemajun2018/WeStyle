@@ -365,7 +365,7 @@ const App: React.FC = () => {
       try {
         const { blob, width, height, mimeType, originalSize, compressedSize } = await compressImage(file);
         const id = generateImageId();
-        await imageStore.saveImage({
+        await imageStore.saveImageWithOriginal({
           id,
           name: file.name || 'image',
           mimeType,
@@ -374,7 +374,7 @@ const App: React.FC = () => {
           originalSize,
           compressedSize,
           createdAt: Date.now(),
-        }, blob);
+        }, blob, file);
         // Create a local object URL for short placeholder mapping
         const objectUrl = URL.createObjectURL(blob);
         const shortKey = getOrAssignShortUrl(objectUrl);
@@ -563,7 +563,7 @@ const App: React.FC = () => {
         }
 
         const id = generateImageId();
-        await imageStore.saveImage({ id, name: file.name || 'image', mimeType: mimeType || 'application/octet-stream', width, height, originalSize, compressedSize, createdAt: Date.now() }, blob);
+        await imageStore.saveImageWithOriginal({ id, name: file.name || 'image', mimeType: mimeType || 'application/octet-stream', width, height, originalSize, compressedSize, createdAt: Date.now() }, blob, file);
         const objectUrl = URL.createObjectURL(blob);
         const shortKey = getOrAssignShortUrl(objectUrl);
         if (shortKey) shortToLocalIdRef.current.set(shortKey, id);
@@ -676,7 +676,7 @@ const App: React.FC = () => {
           blob = res.blob; width = res.width; height = res.height; mimeType = res.mimeType; originalSize = res.originalSize; compressedSize = res.compressedSize;
         }
         const id = generateImageId();
-        await imageStore.saveImage({ id, name: file.name || 'image', mimeType: mimeType || 'application/octet-stream', width, height, originalSize, compressedSize, createdAt: Date.now() }, blob);
+        await imageStore.saveImageWithOriginal({ id, name: file.name || 'image', mimeType: mimeType || 'application/octet-stream', width, height, originalSize, compressedSize, createdAt: Date.now() }, blob, file);
         const objectUrl = URL.createObjectURL(blob);
         const shortKey = getOrAssignShortUrl(objectUrl);
         if (shortKey) shortToLocalIdRef.current.set(shortKey, id);
@@ -858,7 +858,7 @@ const App: React.FC = () => {
 
   function imageBlockForStyle(style: StyleType, id: string | null, src: string, remoteUrl: string | null) {
     // Base styles
-    const baseImg = 'width: 100%; max-height: 400px; object-fit: contain; border-radius: 8px; display: block;';
+    const baseImg = 'width: 100%; height: auto; border-radius: 8px; display: block;';
     const baseWrap = 'margin: 20px 0; text-align: center;';
     let extraWrap = '';
     let extraImg = '';
@@ -934,7 +934,8 @@ const App: React.FC = () => {
       const remote = img.getAttribute('data-image-url');
       try {
         if (id) {
-          const blob = await imageStore.getImageBlob(id);
+          // Prefer original (full-quality) when copying to WeChat
+          const blob = await imageStore.getImageOriginalBlob(id);
           if (blob) {
             const b64 = await blobToDataURL(blob);
             img.setAttribute('src', b64);
@@ -1054,7 +1055,7 @@ const App: React.FC = () => {
           <div className="text-[var(--accent-color,#5c7c68)] w-6 h-6">
             <svg fill="none" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg"><g clipPath="url(#c)"><path d="M8.58 8.58A23 23 0 0 0 2.61 19.75a23 23 0 0 0 1.24 12.6A23 23 0 0 0 24 45.81a23 23 0 0 0 12.12-3.68 23 23 0 0 0 8.03-9.78 23 23 0 0 0 1.24-12.6 23 23 0 0 0-5.97-11.17L24 24 8.58 8.58Z" fill="currentColor"/></g><defs><clipPath id="c"><path fill="#fff" d="M0 0h48v48H0z"/></clipPath></defs></svg>
           </div>
-          <h1 className="text-lg font-bold tracking-tight">Museflow</h1>
+          <h1 className="text-lg font-bold tracking-tight">EasyPub</h1>
         </div>
       </header>
 
